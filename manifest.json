@@ -1,9 +1,20 @@
 {
-    "name": "Synonymity",
-    "version": 1.0,
-    "manifest_version": 2,
-    "description": "Extension to quickly and efficiently find definitions and synonyms of words.",
-    "browser_action": {
-        "default_popup": "index.html"
+  "name": "Synon",
+  "version": "1.0.0",
+  "manifest_version": 3,
+  "description": "Extension that defines selected words and phrases using page context.",
+  "action": {
+    "default_popup": "dist/popup/popup.html"
+  },
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["dist/content.js"]
     }
+  ],
+  "permissions": ["activeTab", "storage"],
+  "host_permissions": ["<all_urls>"]
 }
