@@ -1,25 +1,54 @@
-type SelectionType = "word" | "phrase" | "invalid";
+import { isCommonWord } from "./common-words";
+import { noun, verb, adjective } from "wink-lemmatizer";
+import type { Definition, DefineResponse } from "./shared/types";
+import { classify } from "./shared/validation";
+import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED } from "./shared/messages";
 
-function classify(text: string): SelectionType {
-  const trimmed = text.trim();
-  if (!trimmed) return "invalid";
-
-  // Must contain at least one letter
-  if (!/[a-zA-Z]/.test(trimmed)) return "invalid";
-
-  // Split on whitespace to count words
-  const words = trimmed.split(/\s+/);
-
-  // Single token: valid word if it's mostly alphabetic (allow hyphens, apostrophes)
-  if (words.length === 1) {
-    return /^[a-zA-Z][a-zA-Z'\-]*$/.test(trimmed) ? "word" : "invalid";
-  }
-
-  // Multiple tokens: phrase if each token has at least one letter
-  const allValid = words.every((w) => /[a-zA-Z]/.test(w));
-  return allValid ? "phrase" : "invalid";
+// --- Definition cache ---
+interface CacheEntry {
+  response: DefineResponse;
+  timestamp: number;
 }
 
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const CACHE_MAX = 200;
+const definitionCache = new Map<string, CacheEntry>();
+
+function getCacheKey(text: string, exactMode: boolean): string {
+  return text.toLowerCase() + "|" + (exactMode ? "1" : "0");
+}
+
+function getCached(key: string): DefineResponse | null {
+  const entry = definitionCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    definitionCache.delete(key);
+    return null;
+  }
+  return entry.response;
+}
+
+function setCache(key: string, response: DefineResponse): void {
+  // Evict oldest entries if at capacity
+  if (definitionCache.size >= CACHE_MAX) {
+    const firstKey = definitionCache.keys().next().value!;
+    definitionCache.delete(firstKey);
+  }
+  definitionCache.set(key, { response, timestamp: Date.now() });
+}
+
+// --- Lemmatization ---
+function lemmatize(word: string): string[] {
+  const lower = word.toLowerCase();
+  const results = new Set<string>();
+  for (const fn of [noun, verb, adjective]) {
+    const lemma = fn(lower);
+    if (lemma && lemma !== lower) results.add(lemma);
+  }
+  return Array.from(results);
+}
+
+// --- Lookup functions ---
 async function lookupDictionary(word: string): Promise<{ text: string; url: string } | null> {
   try {
     const resp = await fetch(
@@ -57,7 +86,6 @@ async function lookupWikipedia(text: string): Promise<{ text: string; url: strin
 
     const data = await resp.json();
 
-    // Skip disambiguation pages
     if (data.type === "disambiguation") return null;
 
     const extract = data.extract?.trim();
@@ -69,70 +97,6 @@ async function lookupWikipedia(text: string): Promise<{ text: string; url: strin
     return null;
   }
 }
-
-// Register context menu on install
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "synon-define",
-    title: 'Define "%s"',
-    contexts: ["selection"],
-  });
-});
-
-// Handle context menu click
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== "synon-define" || !info.selectionText) return;
-
-  const selectedText = info.selectionText.trim();
-  if (!selectedText) return;
-
-  const result = await handleDefine(selectedText, "");
-
-  // Try sending to content script (works on normal pages)
-  if (tab?.id) {
-    try {
-      await chrome.tabs.sendMessage(tab.id, {
-        type: "SHOW_DEFINITION",
-        selectedText,
-        definitions: result.definitions,
-        error: result.error,
-      });
-      return; // Content script handled it
-    } catch {
-      // Content script not available (PDF, chrome:// pages, etc.)
-    }
-  }
-
-  // Fallback: store in local storage and show badge
-  const fallbackDef = result.definitions[0]?.text ?? null;
-  await chrome.storage.local.set({
-    synonPendingDefinition: {
-      word: selectedText,
-      definition: fallbackDef,
-      error: result.error,
-    },
-  });
-  chrome.action.setBadgeText({ text: "1" });
-  chrome.action.setBadgeBackgroundColor({ color: "#4A90D9" });
-});
-
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type === "DEFINE") {
-    const { selectedText, pageContext } = message as {
-      selectedText: string;
-      pageContext: string;
-    };
-    handleDefine(selectedText, pageContext).then(sendResponse);
-    return true;
-  }
-
-  if (message.type === "BADGE_CLEAR") {
-    chrome.action.setBadgeText({ text: "" });
-    return false;
-  }
-
-  return false;
-});
 
 async function lookupAI(
   selectedText: string,
@@ -173,22 +137,107 @@ async function lookupAI(
   }
 }
 
-interface Definition {
-  source: string;
-  text: string;
-  url: string | null;
+// --- PDF detection helpers ---
+function isPdfUrl(url: string): boolean {
+  try { return new URL(url).pathname.toLowerCase().endsWith(".pdf"); }
+  catch { return false; }
 }
 
+function getViewerUrl(pdfUrl: string): string {
+  return `${chrome.runtime.getURL("pdfjs/web/viewer.html")}?file=${encodeURIComponent(pdfUrl)}`;
+}
+
+// URL-based PDF detection (catches .pdf links before navigation completes)
+chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+  if (details.frameId !== 0) return;
+  if (!isPdfUrl(details.url)) return;
+  if (details.url.startsWith(chrome.runtime.getURL(""))) return;
+  chrome.tabs.update(details.tabId, { url: getViewerUrl(details.url) });
+});
+
+// --- Context menu ---
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: "synon-define",
+    title: 'Define "%s"',
+    contexts: ["selection"],
+  });
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId !== "synon-define" || !info.selectionText) return;
+
+  const selectedText = info.selectionText.trim();
+  if (!selectedText) return;
+
+  const result = await handleDefine(selectedText, "", true);
+
+  if (tab?.id) {
+    try {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: MSG_SHOW_DEFINITION,
+        selectedText,
+        definitions: result.definitions,
+        error: result.error,
+      });
+    } catch {
+      // Content script not available — no popup possible
+    }
+  }
+});
+
+// --- Message handling ---
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === MSG_DEFINE) {
+    const { selectedText, pageContext, exactMode } = message as {
+      selectedText: string;
+      pageContext: string;
+      exactMode?: boolean;
+    };
+    handleDefine(selectedText, pageContext, exactMode ?? false).then(sendResponse);
+    return true;
+  }
+
+  // Embed-based PDF detection (catches PDFs served without .pdf extension)
+  if (message.type === MSG_PDF_DETECTED) {
+    const tabId = sender.tab?.id;
+    if (tabId != null) {
+      chrome.tabs.update(tabId, { url: getViewerUrl(message.url) });
+    }
+    return false;
+  }
+
+  return false;
+});
+
+// --- Core define handler ---
 async function handleDefine(
   selectedText: string,
-  pageContext: string
-): Promise<{ definitions: Definition[]; error?: string }> {
+  pageContext: string,
+  exactMode: boolean = false
+): Promise<DefineResponse> {
+  // Check cache first
+  const cacheKey = getCacheKey(selectedText, exactMode);
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
   const type = classify(selectedText);
   if (type === "invalid") {
     return { definitions: [], error: "Please select a valid word or phrase." };
   }
 
-  // Run dictionary and wikipedia lookups in parallel
+  if (!exactMode) {
+    if (type === "word" && isCommonWord(selectedText)) {
+      return { definitions: [], skip: true };
+    }
+    if (type === "phrase") {
+      const words = selectedText.trim().split(/\s+/);
+      if (words.some((w) => isCommonWord(w))) {
+        return { definitions: [], skip: true };
+      }
+    }
+  }
+
   const [dictResult, wikiResult] = await Promise.all([
     lookupDictionary(selectedText),
     lookupWikipedia(selectedText),
@@ -198,7 +247,19 @@ async function handleDefine(
   if (dictResult) definitions.push({ source: "Dictionary", text: dictResult.text, url: dictResult.url });
   if (wikiResult) definitions.push({ source: "Wikipedia", text: wikiResult.text, url: wikiResult.url });
 
-  // Fall back to AI only if both free sources failed
+  if (definitions.length === 0 && type === "word") {
+    const lemmas = lemmatize(selectedText);
+    for (const lemma of lemmas) {
+      const [lemmaDict, lemmaWiki] = await Promise.all([
+        lookupDictionary(lemma),
+        lookupWikipedia(lemma),
+      ]);
+      if (lemmaDict) definitions.push({ source: "Dictionary", text: lemmaDict.text, url: lemmaDict.url, rootWord: lemma });
+      if (lemmaWiki) definitions.push({ source: "Wikipedia", text: lemmaWiki.text, url: lemmaWiki.url, rootWord: lemma });
+      if (definitions.length > 0) break;
+    }
+  }
+
   if (definitions.length === 0) {
     const aiResult = await lookupAI(selectedText, pageContext);
     if (aiResult) {
@@ -216,7 +277,9 @@ async function handleDefine(
     };
   }
 
-  return { definitions };
+  const response: DefineResponse = { definitions };
+  setCache(cacheKey, response);
+  return response;
 }
 
 async function getApiKey(): Promise<string | null> {

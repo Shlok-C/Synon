@@ -33,40 +33,43 @@
       font-size: 13px;
       color: #555;
     }
-    #definitionSection {
-      display: none;
-      margin-bottom: 16px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid #e8e8e8;
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #e8e8e8;
     }
-    #defWord {
-      font-weight: 600;
-      font-size: 15px;
-      color: #111;
-      margin-bottom: 6px;
+    .toggle-row label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 0;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
     }
-    #defText {
-      font-size: 13px;
-      color: #333;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-    }
-    #defText.synon-error {
-      color: #b91c1c;
+    #exactModeDesc {
+      font-size: 12px;
+      color: #888;
+      margin-top: 4px;
     }
   </style>
 </head>
 <body>
-  <div id="definitionSection">
-    <div id="defWord"></div>
-    <div id="defText"></div>
-  </div>
   <h1>Synon Settings</h1>
   <label for="apiKey">API Key</label>
   <input type="password" id="apiKey" placeholder="Enter your API key" />
   <button id="save">Save</button>
   <div id="status"></div>
+  <div class="toggle-row">
+    <label for="exactMode">
+      <input type="checkbox" id="exactMode" />
+      Exact Mode
+    </label>
+  </div>
+  <div id="exactModeDesc">When off, common words are silently skipped.</div>
   <script src="popup.js"></script>
 </body>
 </html>

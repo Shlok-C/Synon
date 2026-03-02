@@ -1,40 +1,47 @@
-# Plan: Nested Definitions + Multiple Definitions
+# Plan: Fix space-trimming, cap phrase length, and add root word fallback
 
-**Goal:** Selecting text inside the popup replaces it with a new definition (with back navigation), and words with multiple sources show left/right arrows to page through them.
-
+**Goal:** Selecting "genus " (with spaces) defines correctly, phrases over 5 words are rejected, and inflected words like "Hamiltonians" fall back to their root form when lookups fail.
 **Constraint source:** CLAUDE.md reviewed ✓
-**Prior plan:** replaced (definition pipeline plan, fully completed)
-**Created:** 2026-03-01
+**Prior plan:** replaced (nested definitions plan, fully completed)
+**Created:** 2026-03-02
 
 ---
 
-## Step 1: Background returns multiple definitions [DONE]
+## Step 1: Trim the selection range before checking partial-word boundaries
 
-**What:** Change `handleDefine` to run Dictionary + Wikipedia lookups in parallel via `Promise.all`, collecting all successful results into a `{ source, text }[]` array. Fall back to AI only if both free sources fail. Response shape changes from `{ definition }` to `{ definitions[] }`.
+**What:** In `isPartialWordSelection`, trim leading/trailing whitespace from the selection range before checking adjacent characters. Specifically, advance `startOffset` past any whitespace and retreat `endOffset` past any whitespace, so that selecting "genus " doesn't see the next word's letter at the boundary and falsely reject the selection.
+**Files:** `src/content.ts` (lines 33-44)
+**Verify:** `npm run typecheck` passes. Selecting "genus " (with trailing space) no longer gets rejected by the partial-word check.
+
+## Step 2: Add a max word count cap of 5 to `classify` in background
+
+**What:** In the `classify` function, after splitting on whitespace, reject selections with more than 5 words by returning `"invalid"`.
+**Why:** Without a cap, selecting a full paragraph would trigger API lookups.
+**Files:** `src/background.ts` (lines 12-31)
+**Verify:** `npm run typecheck` passes. A 6+ word selection returns `"invalid"` from `classify`.
+
+## Step 3: Add a `getStem` function to strip common English suffixes
+
+**What:** Create a `getStem(word: string): string | null` function in `src/background.ts` that attempts to produce a root form by stripping common inflectional suffixes in order of specificity: `-ians` -> `-ian`, `-ies` -> `-y`, `-ves` -> `-f`, `-es` -> `""`, `-s` -> `""`, `-ing` (handle doubling: `running` -> `run`, `making` -> `make`), `-ed` (handle doubling: `stopped` -> `stop`, `baked` -> `bake`), `-ly`, `-ness`, `-ment`, `-tion`/`-sion`. Return `null` if the word is too short after stripping or unchanged.
+**Why:** A simple suffix-stripping approach avoids adding an NLP dependency while covering the most common inflections (plurals, verb forms, adverbs).
 **Files:** `src/background.ts`
-**Verify:** `npm run typecheck` passes. Common words return 2 definitions (dictionary + wikipedia).
+**Verify:** `npm run typecheck` passes. `getStem("Hamiltonians")` returns `"Hamiltonian"`, `getStem("running")` returns `"run"`.
 
-## Step 2: Content script handles multi-definition responses [DONE]
+## Step 4: Integrate root word fallback into `handleDefine`
 
-**What:** Update mouseup listener and SHOW_DEFINITION handler to accept a definitions array. Store definitions + current index on popup state. Build a footer with `‹`/`›` arrows and `1 / 3` label positioned bottom-right. Footer only visible when `definitions.length > 1`.
-**Files:** `src/content.ts`
-**Verify:** `npm run typecheck` passes. Selecting "run" shows nav arrows to cycle through dictionary + wikipedia definitions.
+**What:** In `handleDefine`, after the parallel dictionary+wikipedia lookups return zero results and before the AI fallback, call `getStem` on the selected text. If a stem is produced, retry `lookupDictionary` and `lookupWikipedia` in parallel with the stem. Merge any results into the definitions array. Only fall through to AI if both the original and stemmed lookups failed.
+**Files:** `src/background.ts` (`handleDefine` function, lines 194-238)
+**Verify:** `npm run typecheck` passes. Selecting "Hamiltonians" finds results for "Hamiltonian" from dictionary/wikipedia before reaching AI fallback.
 
-## Step 3: Nested definitions via in-popup text selection [DONE]
+## Step 5: Build and verify
 
-**What:** Maintain a stack of popup states (`{ word, definitions, index }[]`). Listen for mouseup on the shadow root — when text is selected inside the popup body, push current state onto stack, show loading, send new DEFINE message. Show a `←` back button in top-left of header (hidden when stack is empty). Back pops stack and restores previous state. Close (`×`) dismisses entire popup and clears stack.
-**Files:** `src/content.ts`
-**Verify:** `npm run typecheck` passes. Selecting text inside popup replaces content with new definition, back arrow appears, clicking it restores previous.
-
-## Step 4: Add styles for new elements [DONE]
-
-**What:** Add CSS for `.synon-back` (top-left, same style as close), `.synon-footer` (flex row, justify-content: flex-end), `.synon-nav-btn` (small arrow buttons), `.synon-nav-label` (counter text, subtle color).
-**Files:** `src/content.ts` (inside `buildShadowStyles`)
-**Verify:** `npm run build` succeeds. Popup layout matches the ASCII mockup from the design.
+**What:** Run `npm run build` to bundle the changes into `dist/`.
+**Verify:** Build succeeds with no errors.
 
 ---
 
 ## Out of Scope
-- Caching definitions locally
-- Showing the definition source label (e.g. "Dictionary", "Wikipedia") in the UI
-- Animating transitions between nested definitions
+- Full lemmatization / NLP library
+- Changing the gibberish detection heuristic
+- Modifying exact mode behavior
+- Showing "(root: Hamiltonian)" in the popup UI

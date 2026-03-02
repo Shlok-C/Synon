@@ -3,6 +3,8 @@
 ## Core Philosophy
 A plan is a commitment to the simplest path that actually works. Every step must be grounded in research, not assumption. The output is always a living `PLAN.md` — not a chat message, not a summary, a file.
 
+User request: $ARGUMENTS
+
 ---
 
 ## When to Use This Skill

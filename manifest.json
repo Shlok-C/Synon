@@ -19,6 +19,10 @@
       "run_at": "document_idle"
     }
   ],
-  "permissions": ["activeTab", "storage", "contextMenus"],
-  "host_permissions": ["<all_urls>"]
+  "permissions": ["activeTab", "storage", "contextMenus", "webNavigation"],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [{
+    "resources": ["pdfjs/*"],
+    "matches": ["<all_urls>"]
+  }]
 }

@@ -9,8 +9,12 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
+    "@types/chrome": "^0.0.287",
     "esbuild": "^0.24.0",
-    "@types/chrome": "^0.0.287"
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^5.5.207",
+    "wink-lemmatizer": "^3.0.4"
   }
 }
