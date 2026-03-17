@@ -14,8 +14,8 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const CACHE_MAX = 200;
 const definitionCache = new Map<string, CacheEntry>();
 
-function getCacheKey(text: string, exactMode: boolean): string {
-  return text.toLowerCase() + "|" + (exactMode ? "1" : "0");
+function getCacheKey(text: string, exactMode: boolean, verbosity: number): string {
+  return text.toLowerCase() + "|" + (exactMode ? "1" : "0") + "|v" + verbosity;
 }
 
 function getCached(key: string): DefineResponse | null {
@@ -48,6 +48,27 @@ function lemmatize(word: string): string[] {
   return Array.from(results);
 }
 
+// --- Verbosity truncation ---
+const VERBOSITY_SENTENCE_MAP: Record<number, number> = {
+  1: 1,
+  2: 2,
+  3: 3,
+  4: 5,
+  5: Infinity,
+};
+
+function truncateByVerbosity(text: string, verbosity: number): string {
+  const maxSentences = VERBOSITY_SENTENCE_MAP[verbosity] ?? 3;
+  if (maxSentences === Infinity) return text;
+
+  // Split on sentence boundaries: period/!/? followed by space and uppercase letter, or end of string
+  const sentences = text.match(/[^.!?]*[.!?]+(?:\s|$)/g);
+  if (!sentences) return text;
+
+  const truncated = sentences.slice(0, maxSentences).join("").trim();
+  return truncated || text;
+}
+
 // --- Lookup functions ---
 async function lookupDictionary(word: string): Promise<{ text: string; url: string } | null> {
   try {
@@ -77,24 +98,124 @@ async function lookupDictionary(word: string): Promise<{ text: string; url: stri
   }
 }
 
-async function lookupWikipedia(text: string): Promise<{ text: string; url: string } | null> {
+const WIKI_DISAMBIG_MAX = 5;
+
+async function fetchWikiSummary(title: string): Promise<{ title: string; text: string; url: string } | null> {
+  try {
+    const resp = await fetch(
+      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data.type === "disambiguation") return null;
+    const extract = data.extract?.trim();
+    if (!extract || extract.length <= 10) return null;
+    const url = data.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`;
+    return { title: data.title || title, text: extract, url };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchDisambiguationEntries(title: string): Promise<string[]> {
+  try {
+    // Try section 0 first (the "most commonly refers to" entries)
+    const resp = await fetch(
+      `https://en.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(title)}&prop=wikitext&section=0&format=json&origin=*`
+    );
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    const wikitext: string = data?.parse?.wikitext?.["*"] || "";
+    let links = parseWikitextLinks(wikitext);
+
+    // If section 0 has no article links, try sections 1-3
+    if (links.length === 0) {
+      const sectionLinks: string[] = [];
+      for (let s = 1; s <= 3; s++) {
+        const sResp = await fetch(
+          `https://en.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(title)}&prop=wikitext&section=${s}&format=json&origin=*`
+        );
+        if (!sResp.ok) break;
+        const sData = await sResp.json();
+        const sWikitext: string = sData?.parse?.wikitext?.["*"] || "";
+        sectionLinks.push(...parseWikitextLinks(sWikitext));
+        if (sectionLinks.length >= WIKI_DISAMBIG_MAX) break;
+      }
+      links = sectionLinks;
+    }
+
+    return links.slice(0, WIKI_DISAMBIG_MAX);
+  } catch {
+    return [];
+  }
+}
+
+function parseWikitextLinks(wikitext: string): string[] {
+  const linkRegex = /\[\[([^|\]]+?)(?:\|[^\]]+?)?\]\]/;
+  const links: string[] = [];
+  for (const line of wikitext.split("\n")) {
+    const trimmed = line.trimStart();
+    // Only consider top-level bullets (starts with * but not **)
+    if (!trimmed.startsWith("*") || trimmed.startsWith("**")) continue;
+    const match = linkRegex.exec(trimmed);
+    if (!match) continue;
+    const target = match[1].trim();
+    // Skip non-article links
+    if (target.startsWith("wikt:") || target.startsWith("Category:") ||
+        target.startsWith("File:") || target.startsWith("Help:") ||
+        target.startsWith("Wikipedia:")) continue;
+    if (!links.includes(target)) links.push(target);
+  }
+  return links;
+}
+
+async function lookupWikipedia(text: string): Promise<{ title: string; text: string; url: string }[]> {
   try {
     const resp = await fetch(
       `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(text)}`
     );
-    if (!resp.ok) return null;
+    if (!resp.ok) return [];
 
     const data = await resp.json();
 
-    if (data.type === "disambiguation") return null;
+    // Disambiguation page: fetch top entries
+    if (data.type === "disambiguation") {
+      const entries = await fetchDisambiguationEntries(text);
+      if (entries.length === 0) return [];
+      const results = await Promise.all(entries.map(fetchWikiSummary));
+      const filtered = results.filter((r): r is { title: string; text: string; url: string } => r !== null);
+      // Deduplicate by resolved title (redirects can map multiple entries to the same article)
+      const seen = new Set<string>();
+      return filtered.filter(r => {
+        if (seen.has(r.title)) return false;
+        seen.add(r.title);
+        return true;
+      });
+    }
 
+    // Normal page — also check for a separate disambiguation page
     const extract = data.extract?.trim();
-    if (!extract || extract.length <= 10) return null;
-
+    if (!extract || extract.length <= 10) return [];
     const url = data.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encodeURIComponent(text)}`;
-    return { text: extract, url };
+    const primary = { title: data.title || text, text: extract, url };
+
+    // Try to find additional meanings from a _(disambiguation) page
+    const disambigEntries = await fetchDisambiguationEntries(`${text}_(disambiguation)`);
+    if (disambigEntries.length === 0) return [primary];
+
+    const disambigResults = await Promise.all(disambigEntries.map(fetchWikiSummary));
+    const filtered = disambigResults.filter(
+      (r): r is { title: string; text: string; url: string } => r !== null
+    );
+    const seen = new Set<string>([primary.title]);
+    const additional = filtered.filter(r => {
+      if (seen.has(r.title)) return false;
+      seen.add(r.title);
+      return true;
+    });
+    return [primary, ...additional].slice(0, WIKI_DISAMBIG_MAX);
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -152,7 +273,10 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0) return;
   if (!isPdfUrl(details.url)) return;
   if (details.url.startsWith(chrome.runtime.getURL(""))) return;
-  chrome.tabs.update(details.tabId, { url: getViewerUrl(details.url) });
+  chrome.storage.sync.get("pdfViewerEnabled", (result) => {
+    if (result.pdfViewerEnabled === false) return;
+    chrome.tabs.update(details.tabId, { url: getViewerUrl(details.url) });
+  });
 });
 
 // --- Context menu ---
@@ -189,12 +313,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 // --- Message handling ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === MSG_DEFINE) {
-    const { selectedText, pageContext, exactMode } = message as {
+    const { selectedText, pageContext, exactMode, verbosity } = message as {
       selectedText: string;
       pageContext: string;
       exactMode?: boolean;
+      verbosity?: number;
     };
-    handleDefine(selectedText, pageContext, exactMode ?? false).then(sendResponse);
+    handleDefine(selectedText, pageContext, exactMode ?? false, verbosity ?? 3).then(sendResponse);
     return true;
   }
 
@@ -202,7 +327,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === MSG_PDF_DETECTED) {
     const tabId = sender.tab?.id;
     if (tabId != null) {
-      chrome.tabs.update(tabId, { url: getViewerUrl(message.url) });
+      chrome.storage.sync.get("pdfViewerEnabled", (result) => {
+        if (result.pdfViewerEnabled === false) return;
+        chrome.tabs.update(tabId, { url: getViewerUrl(message.url) });
+      });
     }
     return false;
   }
@@ -214,10 +342,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleDefine(
   selectedText: string,
   pageContext: string,
-  exactMode: boolean = false
+  exactMode: boolean = false,
+  verbosity: number = 3
 ): Promise<DefineResponse> {
   // Check cache first
-  const cacheKey = getCacheKey(selectedText, exactMode);
+  const cacheKey = getCacheKey(selectedText, exactMode, verbosity);
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
@@ -238,14 +367,23 @@ async function handleDefine(
     }
   }
 
-  const [dictResult, wikiResult] = await Promise.all([
+  const [dictResult, wikiResults] = await Promise.all([
     lookupDictionary(selectedText),
     lookupWikipedia(selectedText),
   ]);
 
   const definitions: Definition[] = [];
-  if (dictResult) definitions.push({ source: "Dictionary", text: dictResult.text, url: dictResult.url });
-  if (wikiResult) definitions.push({ source: "Wikipedia", text: wikiResult.text, url: wikiResult.url });
+
+  // Deduplicate: drop dictionary if Wikipedia has a direct (non-disambiguation) article match
+  const hasDirectWikiMatch = wikiResults.some(
+    (wr) => wr.title.toLowerCase() === selectedText.toLowerCase()
+  );
+  if (dictResult && !hasDirectWikiMatch) {
+    definitions.push({ source: "Dictionary", text: dictResult.text, url: dictResult.url });
+  }
+  for (const wr of wikiResults) {
+    definitions.push({ source: "Wikipedia", text: truncateByVerbosity(wr.text, verbosity), url: wr.url, title: wr.title });
+  }
 
   if (definitions.length === 0 && type === "word") {
     const lemmas = lemmatize(selectedText);
@@ -255,7 +393,9 @@ async function handleDefine(
         lookupWikipedia(lemma),
       ]);
       if (lemmaDict) definitions.push({ source: "Dictionary", text: lemmaDict.text, url: lemmaDict.url, rootWord: lemma });
-      if (lemmaWiki) definitions.push({ source: "Wikipedia", text: lemmaWiki.text, url: lemmaWiki.url, rootWord: lemma });
+      for (const lw of lemmaWiki) {
+        definitions.push({ source: "Wikipedia", text: truncateByVerbosity(lw.text, verbosity), url: lw.url, rootWord: lemma, title: lw.title });
+      }
       if (definitions.length > 0) break;
     }
   }

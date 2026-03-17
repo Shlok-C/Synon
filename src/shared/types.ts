@@ -3,6 +3,7 @@ export interface Definition {
   text: string;
   url: string | null;
   rootWord?: string;
+  title?: string;
 }
 
 export interface PopupState {

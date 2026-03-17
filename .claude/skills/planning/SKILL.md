@@ -31,7 +31,7 @@ cat CLAUDE.md 2>/dev/null || echo "No CLAUDE.md found"
 
 `CLAUDE.md` — tech stack, conventions, constraints, forbidden patterns, testing approach. These are hard constraints. A plan step that violates CLAUDE.md is invalid.
 
-`PLAN.md` — if it exists, determine: Is this a new plan replacing the old one? A continuation? A revision of specific steps? Never silently overwrite a PLAN.md without understanding what's already there.
+`PLAN.md` — Find most recent plan, determine: Is this a new plan? A continuation? A revision of specific steps? Never make a new plan without understand the previous plans, and never overwrite the file. Always add new plans to this file to keep an updated record of all plans executed.
 
 ---
 

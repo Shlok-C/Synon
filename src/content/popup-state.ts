@@ -21,7 +21,8 @@ export function createPopupStateManager(elements: PopupElements): PopupStateMana
     if (!currentPopupState) return;
 
     const { word, definitions, index } = currentPopupState;
-    elements.wordEl.textContent = word;
+    const def = definitions[index] as Definition | undefined;
+    elements.wordEl.textContent = def?.title || word;
 
     elements.bodyEl.classList.remove("synon-loading", "synon-error");
 
@@ -30,25 +31,24 @@ export function createPopupStateManager(elements: PopupElements): PopupStateMana
       elements.bodyEl.classList.add("synon-loading");
       elements.sourceEl.classList.add("synon-hidden");
     } else {
-      const def = definitions[index];
-      elements.bodyEl.textContent = def.text;
+      elements.bodyEl.textContent = def!.text;
 
-      if (def.rootWord) {
+      if (def!.rootWord) {
         const rootSpan = document.createElement("span");
         rootSpan.className = "synon-root";
-        rootSpan.textContent = `(root: ${def.rootWord})`;
+        rootSpan.textContent = `(root: ${def!.rootWord})`;
         elements.bodyEl.appendChild(rootSpan);
       }
 
       if (elements.sourceEl && elements.sourceLinkEl) {
-        if (def.url) {
-          elements.sourceLinkEl.href = def.url;
-          elements.sourceLinkEl.textContent = def.source;
+        if (def!.url) {
+          elements.sourceLinkEl.href = def!.url;
+          elements.sourceLinkEl.textContent = def!.source;
           elements.sourceEl.textContent = "";
           elements.sourceEl.appendChild(document.createTextNode("Source: "));
           elements.sourceEl.appendChild(elements.sourceLinkEl);
         } else {
-          elements.sourceEl.textContent = `Source: ${def.source}`;
+          elements.sourceEl.textContent = `Source: ${def!.source}`;
         }
         elements.sourceEl.classList.remove("synon-hidden");
       }
@@ -63,10 +63,10 @@ export function createPopupStateManager(elements: PopupElements): PopupStateMana
 
     // Footer visibility
     if (definitions.length > 1) {
-      elements.footerEl.classList.remove("synon-hidden");
+      elements.navEl.classList.remove("synon-hidden");
       elements.navLabel.textContent = `${index + 1} / ${definitions.length}`;
     } else {
-      elements.footerEl.classList.add("synon-hidden");
+      elements.navEl.classList.add("synon-hidden");
     }
   }
 
@@ -92,7 +92,7 @@ export function createPopupStateManager(elements: PopupElements): PopupStateMana
         elements.bodyEl.classList.remove("synon-loading");
         elements.bodyEl.classList.add("synon-error");
         elements.bodyEl.textContent = error;
-        elements.footerEl.classList.add("synon-hidden");
+        elements.navEl.classList.add("synon-hidden");
         elements.sourceEl.classList.add("synon-hidden");
         return;
       }
@@ -101,7 +101,7 @@ export function createPopupStateManager(elements: PopupElements): PopupStateMana
         elements.bodyEl.classList.remove("synon-loading");
         elements.bodyEl.classList.add("synon-error");
         elements.bodyEl.textContent = "Something went wrong.";
-        elements.footerEl.classList.add("synon-hidden");
+        elements.navEl.classList.add("synon-hidden");
         elements.sourceEl.classList.add("synon-hidden");
         return;
       }

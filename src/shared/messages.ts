@@ -9,6 +9,7 @@ export interface DefineMessage {
   selectedText: string;
   pageContext: string;
   exactMode: boolean;
+  verbosity: number;
 }
 
 export interface ShowDefinitionMessage {

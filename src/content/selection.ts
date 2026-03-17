@@ -1,6 +1,11 @@
 import { isGibberish } from "../shared/validation";
 
 export function isPartialWordSelection(selection: Selection): boolean {
+  // PDF.js text layers split text into individual spans, so word boundaries
+  // often fall at span edges — the adjacent-character check falsely rejects
+  // valid full-word selections. Skip the check entirely on the PDF viewer.
+  if (location.pathname.includes("pdfjs/web/viewer.html")) return false;
+
   if (selection.rangeCount === 0) return false;
   const range = selection.getRangeAt(0);
   let { startContainer, startOffset, endContainer, endOffset } = range;

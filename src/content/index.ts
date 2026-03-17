@@ -12,6 +12,7 @@ let dismissedByClose = false;
 
 const positionTracker = createPositionTracker();
 let stateManager: PopupStateManager | null = null;
+let lastButtonActionTime = 0;
 
 function removePopup(): void {
   positionTracker.detach();
@@ -32,16 +33,20 @@ function showPopup(range: Range, selectedText: string): void {
 
   const elements = buildPopupDOM(shadow, selectedText, {
     onClose() {
+      lastButtonActionTime = Date.now();
       dismissedByClose = true;
       removePopup();
     },
     onBack() {
+      lastButtonActionTime = Date.now();
       stateManager?.popStack();
     },
     onPrev() {
+      lastButtonActionTime = Date.now();
       stateManager?.navigatePrev();
     },
     onNext() {
+      lastButtonActionTime = Date.now();
       stateManager?.navigateNext();
     },
   });
@@ -61,10 +66,20 @@ function showPopup(range: Range, selectedText: string): void {
   shadow.addEventListener("mouseup", (e: Event) => {
     e.stopPropagation();
 
+    // Skip if a button was just clicked
+    if (Date.now() - lastButtonActionTime < 100) return;
+
+    // Don't process selection when clicking interactive elements
+    const target = e.target as HTMLElement;
+    if (target.closest?.("button")) return;
+
     const sel = "getSelection" in shadow
       ? (shadow as any).getSelection() as Selection | null
       : document.getSelection();
     if (!sel || sel.isCollapsed) return;
+
+    // Only process selections originating inside the shadow DOM
+    if (sel.anchorNode && !shadow.contains(sel.anchorNode)) return;
 
     const text = sel.toString().trim();
     if (!text) return;
@@ -74,10 +89,11 @@ function showPopup(range: Range, selectedText: string): void {
     stateManager?.pushAndLoad(text);
 
     const hostAtRequest = currentHost;
-    chrome.storage.sync.get("exactMode", (result) => {
+    chrome.storage.sync.get(["exactMode", "verbosity"], (result) => {
       const exactMode = result.exactMode === true;
+      const verbosity = result.verbosity ?? 3;
       chrome.runtime.sendMessage(
-        { type: MSG_DEFINE, selectedText: text, pageContext: "", exactMode },
+        { type: MSG_DEFINE, selectedText: text, pageContext: "", exactMode, verbosity },
         (response) => {
           if (currentHost !== hostAtRequest) return;
           if (chrome.runtime.lastError) {
@@ -110,7 +126,8 @@ function showPopup(range: Range, selectedText: string): void {
 // Dismiss on click outside
 document.addEventListener("mousedown", (e: MouseEvent) => {
   if (!currentHost) return;
-  if (e.composedPath().includes(currentHost)) return;
+  if (Date.now() - lastButtonActionTime < 100) return;
+  if (e.target === currentHost || e.composedPath().includes(currentHost)) return;
   removePopup();
 });
 
@@ -149,7 +166,10 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // Show popup on text selection
 document.addEventListener("mouseup", (e: MouseEvent) => {
-  if (currentHost && e.composedPath().includes(currentHost)) return;
+  // Skip if a popup button was just clicked
+  if (Date.now() - lastButtonActionTime < 100) return;
+
+  if (currentHost && (e.target === currentHost || e.composedPath().includes(currentHost))) return;
 
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed) {
@@ -177,10 +197,11 @@ document.addEventListener("mouseup", (e: MouseEvent) => {
 
   const pageContext = getPageContext(selection);
 
-  chrome.storage.sync.get("exactMode", (result) => {
+  chrome.storage.sync.get(["exactMode", "verbosity"], (result) => {
     const exactMode = result.exactMode === true;
+    const verbosity = result.verbosity ?? 3;
     chrome.runtime.sendMessage(
-      { type: MSG_DEFINE, selectedText, pageContext, exactMode },
+      { type: MSG_DEFINE, selectedText, pageContext, exactMode, verbosity },
       (response) => {
         if (currentHost !== hostAtCreation) return;
 
@@ -209,9 +230,12 @@ document.addEventListener("mouseup", (e: MouseEvent) => {
 // --- PDF embed detection ---
 function checkForPdfEmbed(): void {
   if (location.pathname.includes("pdfjs/web/viewer.html")) return;
-  const embed = document.querySelector('embed[type="application/pdf"]');
-  if (embed) {
-    chrome.runtime.sendMessage({ type: MSG_PDF_DETECTED, url: location.href });
-  }
+  chrome.storage.sync.get("pdfViewerEnabled", (result) => {
+    if (result.pdfViewerEnabled === false) return;
+    const embed = document.querySelector('embed[type="application/pdf"]');
+    if (embed) {
+      chrome.runtime.sendMessage({ type: MSG_PDF_DETECTED, url: location.href });
+    }
+  });
 }
 checkForPdfEmbed();

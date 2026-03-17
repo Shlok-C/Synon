@@ -2,7 +2,7 @@ export interface PopupElements {
   card: HTMLDivElement;
   wordEl: HTMLSpanElement;
   bodyEl: HTMLDivElement;
-  footerEl: HTMLDivElement;
+  navEl: HTMLDivElement;
   backBtn: HTMLButtonElement;
   navLabel: HTMLSpanElement;
   sourceEl: HTMLDivElement;
@@ -135,15 +135,14 @@ export function buildShadowStyles(): HTMLStyleElement {
       font-size: 13px;
     }
 
-    .synon-footer {
+    .synon-nav {
       display: flex;
       align-items: center;
-      justify-content: flex-end;
-      padding: 4px 10px 8px;
-      gap: 4px;
+      margin-left: auto;
+      gap: 2px;
     }
 
-    .synon-footer.synon-hidden {
+    .synon-nav.synon-hidden {
       display: none;
     }
 
@@ -232,8 +231,30 @@ export function buildPopupDOM(
   closeBtn.setAttribute("aria-label", "Close");
   closeBtn.textContent = "\u00d7";
 
+  // Nav wrapper: ‹ 1/3 ›
+  const nav = document.createElement("div");
+  nav.className = "synon-nav synon-hidden";
+
+  const prevBtn = document.createElement("button");
+  prevBtn.className = "synon-nav-btn";
+  prevBtn.setAttribute("aria-label", "Previous definition");
+  prevBtn.textContent = "\u2039";
+
+  const label = document.createElement("span");
+  label.className = "synon-nav-label";
+
+  const nextBtn = document.createElement("button");
+  nextBtn.className = "synon-nav-btn";
+  nextBtn.setAttribute("aria-label", "Next definition");
+  nextBtn.textContent = "\u203a";
+
+  nav.appendChild(prevBtn);
+  nav.appendChild(label);
+  nav.appendChild(nextBtn);
+
   header.appendChild(back);
   header.appendChild(word);
+  header.appendChild(nav);
   header.appendChild(closeBtn);
 
   // Divider
@@ -252,51 +273,33 @@ export function buildPopupDOM(
   sourceLink.target = "_blank";
   sourceLink.rel = "noopener noreferrer";
 
-  // Footer: nav arrows
-  const footer = document.createElement("div");
-  footer.className = "synon-footer synon-hidden";
-
-  const prevBtn = document.createElement("button");
-  prevBtn.className = "synon-nav-btn";
-  prevBtn.setAttribute("aria-label", "Previous definition");
-  prevBtn.textContent = "\u2039";
-
-  const label = document.createElement("span");
-  label.className = "synon-nav-label";
-
-  const nextBtn = document.createElement("button");
-  nextBtn.className = "synon-nav-btn";
-  nextBtn.setAttribute("aria-label", "Next definition");
-  nextBtn.textContent = "\u203a";
-
-  footer.appendChild(prevBtn);
-  footer.appendChild(label);
-  footer.appendChild(nextBtn);
-
   card.appendChild(header);
   card.appendChild(divider);
   card.appendChild(body);
   card.appendChild(source);
-  card.appendChild(footer);
   shadow.appendChild(card);
 
   // Wire up callbacks
   closeBtn.addEventListener("mousedown", (e: Event) => {
+    e.preventDefault();
     e.stopPropagation();
     callbacks.onClose();
   });
 
   back.addEventListener("mousedown", (e: Event) => {
+    e.preventDefault();
     e.stopPropagation();
     callbacks.onBack();
   });
 
   prevBtn.addEventListener("mousedown", (e: Event) => {
+    e.preventDefault();
     e.stopPropagation();
     callbacks.onPrev();
   });
 
   nextBtn.addEventListener("mousedown", (e: Event) => {
+    e.preventDefault();
     e.stopPropagation();
     callbacks.onNext();
   });
@@ -305,7 +308,7 @@ export function buildPopupDOM(
     card,
     wordEl: word,
     bodyEl: body,
-    footerEl: footer,
+    navEl: nav,
     backBtn: back,
     navLabel: label,
     sourceEl: source,

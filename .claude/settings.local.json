@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init:*)",
+      "Bash(curl:*)",
+      "Bash(node:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:bundlephobia.com)",
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(npm view:*)",
+      "WebFetch(domain:winkjs.org)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(git rm:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:web.hypothes.is)",
+      "Bash(ls:*)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "Bash(echo:*)",
+      "Bash(# Get all wikitext for Crane to see its structure\ncurl -s -H \"User-Agent: SynonExtension/1.0\" \"https://en.wikipedia.org/w/api.php?action=parse&page=Crane&prop=wikitext&format=json\" | python3 -c \"\nimport json,sys,re\nd=json.load\\(sys.stdin\\)\nwt = d['parse']['wikitext']['*']\n# Extract all [[links]]\nlinks = re.findall\\(r'\\\\[\\\\[\\([^|\\\\]]+?\\)\\(?:\\\\|[^\\\\]]+?\\)?\\\\]\\\\]', wt\\)\n# Filter out non-article links\narticle_links = [l for l in links if not l.startswith\\(\\('wikt:', 'Category:', 'File:', 'Help:'\\)\\)]\nprint\\(f'Total article links: {len\\(article_links\\)}'\\)\nprint\\('First 15:'\\)\nfor l in article_links[:15]:\n    print\\(f'  {l}'\\)\n\" 2>/dev/null)",
+      "Bash(do echo:*)",
+      "Bash(python3:*)",
+      "Bash(echo === $title ===:*)",
+      "Bash(echo === $word section 0 ===:*)",
+      "Bash(echo === Crane section $s ===:*)",
+      "Bash(echo === $word \\(disambiguation\\) section 0 ===:*)",
+      "WebFetch(domain:en.wiktionary.org)",
+      "WebFetch(domain:www.wikidata.org)",
+      "WebFetch(domain:api.wikimedia.org)",
+      "WebFetch(domain:tessl.io)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:usefulangle.com)",
+      "WebFetch(domain:blog.react-pdf.dev)"
+    ]
+  }
+}
