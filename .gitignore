@@ -7,3 +7,6 @@ pdfjs/
 PLAN.md
 CLAUDE.md
 .claude/
+
+# environment variables
+.env

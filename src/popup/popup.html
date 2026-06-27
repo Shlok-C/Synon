@@ -76,6 +76,7 @@
   <label for="apiKey">API Key</label>
   <input type="password" id="apiKey" placeholder="Enter your API key" />
   <button id="save">Save</button>
+  <button id="test">Test</button>
   <div id="status"></div>
   <div class="toggle-row">
     <label for="exactMode">
@@ -84,6 +85,13 @@
     </label>
   </div>
   <div id="exactModeDesc">When off, common words are silently skipped.</div>
+  <div class="toggle-row">
+    <label for="quietMode">
+      <input type="checkbox" id="quietMode" />
+      Quiet Mode
+    </label>
+  </div>
+  <div id="quietModeDesc" style="font-size:12px;color:#888;margin-top:4px;">When on, failed lookups silently dismiss the popup.</div>
   <div class="toggle-row">
     <label for="verbosity">Wikipedia Verbosity</label>
   </div>

@@ -1,10 +1,28 @@
-import type { Definition } from "../shared/types";
+import type { Definition, DefineResponse } from "../shared/types";
 import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED } from "../shared/messages";
 import { getPageContext } from "./context";
 import { createPositionTracker } from "./positioning";
 import { isPartialWordSelection, isValidSelection } from "./selection";
+import { normalizeSelection } from "../shared/validation";
 import { buildPopupDOM } from "./popup-ui";
 import { createPopupStateManager, type PopupStateManager } from "./popup-state";
+
+function sendMessageWithTimeout(
+  message: unknown,
+  timeoutMs: number = 20000
+): Promise<DefineResponse | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs);
+    chrome.runtime.sendMessage(message, (response: DefineResponse) => {
+      clearTimeout(timer);
+      if (chrome.runtime.lastError) {
+        resolve(null);
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
 
 const HOST_ID = "synon-popup-host";
 let currentHost: HTMLDivElement | null = null;
@@ -13,6 +31,7 @@ let dismissedByClose = false;
 const positionTracker = createPositionTracker();
 let stateManager: PopupStateManager | null = null;
 let lastButtonActionTime = 0;
+let lastHandledSelection: { text: string; time: number } = { text: "", time: 0 };
 
 function removePopup(): void {
   positionTracker.detach();
@@ -81,7 +100,7 @@ function showPopup(range: Range, selectedText: string): void {
     // Only process selections originating inside the shadow DOM
     if (sel.anchorNode && !shadow.contains(sel.anchorNode)) return;
 
-    const text = sel.toString().trim();
+    const text = normalizeSelection(sel.toString().trim());
     if (!text) return;
 
     if (stateManager?.currentState && text === stateManager.currentState.word) return;
@@ -89,34 +108,39 @@ function showPopup(range: Range, selectedText: string): void {
     stateManager?.pushAndLoad(text);
 
     const hostAtRequest = currentHost;
-    chrome.storage.sync.get(["exactMode", "verbosity"], (result) => {
+    chrome.storage.sync.get(["exactMode", "verbosity", "quietMode"], async (result) => {
       const exactMode = result.exactMode === true;
       const verbosity = result.verbosity ?? 3;
-      chrome.runtime.sendMessage(
-        { type: MSG_DEFINE, selectedText: text, pageContext: "", exactMode, verbosity },
-        (response) => {
-          if (currentHost !== hostAtRequest) return;
-          if (chrome.runtime.lastError) {
-            stateManager?.setDefinitions([], "Something went wrong.");
-            return;
-          }
-          if (response?.skip) {
-            if (stateManager && stateManager.stackLength > 0) {
-              stateManager.popStack();
-            } else {
-              removePopup();
-            }
-            return;
-          }
-          if (response?.error) {
-            stateManager?.setDefinitions(response.definitions || [], response.error);
-          } else if (response?.definitions?.length) {
-            stateManager?.setDefinitions(response.definitions);
-          } else {
-            stateManager?.setDefinitions([], "Something went wrong.");
-          }
-        }
+      const quietMode = result.quietMode !== false;
+      const response = await sendMessageWithTimeout(
+        { type: MSG_DEFINE, selectedText: text, pageContext: "", exactMode, verbosity }
       );
+      if (currentHost !== hostAtRequest) return;
+      if (!response) {
+        if (quietMode) { removePopup(); return; }
+        stateManager?.setDefinitions([], "Definition timed out. Please try again.");
+        return;
+      }
+      if (response.skip) {
+        if (stateManager && stateManager.stackLength > 0) {
+          stateManager.popStack();
+        } else {
+          removePopup();
+        }
+        return;
+      }
+      if (response.error) {
+        if (quietMode && (!response.definitions || response.definitions.length === 0)) {
+          removePopup();
+          return;
+        }
+        stateManager?.setDefinitions(response.definitions || [], quietMode ? undefined : response.error);
+      } else if (response.definitions?.length) {
+        stateManager?.setDefinitions(response.definitions);
+      } else {
+        if (quietMode) { removePopup(); return; }
+        stateManager?.setDefinitions([], "No response received. Try again.");
+      }
     });
 
     sel.removeAllRanges();
@@ -164,26 +188,28 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-// Show popup on text selection
-document.addEventListener("mouseup", (e: MouseEvent) => {
-  // Skip if a popup button was just clicked
-  if (Date.now() - lastButtonActionTime < 100) return;
-
-  if (currentHost && (e.target === currentHost || e.composedPath().includes(currentHost))) return;
-
+// Core selection handler — shared by mouse, touch, and keyboard selection
+function handleSelection(): void {
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed) {
     dismissedByClose = false;
     return;
   }
 
-  const selectedText = selection.toString().trim();
+  const selectedText = normalizeSelection(selection.toString().trim());
   if (!selectedText) {
     dismissedByClose = false;
     return;
   }
 
   if (dismissedByClose) return;
+
+  // Deduplicate: if the same text was just handled and popup is still showing, skip
+  if (
+    currentHost &&
+    selectedText === lastHandledSelection.text &&
+    Date.now() - lastHandledSelection.time < 500
+  ) return;
 
   if (isPartialWordSelection(selection)) return;
 
@@ -193,38 +219,71 @@ document.addEventListener("mouseup", (e: MouseEvent) => {
 
   showPopup(range, selectedText);
   stateManager?.setLoadingState(selectedText);
+  lastHandledSelection = { text: selectedText, time: Date.now() };
   const hostAtCreation = currentHost;
 
   const pageContext = getPageContext(selection);
 
-  chrome.storage.sync.get(["exactMode", "verbosity"], (result) => {
+  chrome.storage.sync.get(["exactMode", "verbosity", "quietMode"], async (result) => {
     const exactMode = result.exactMode === true;
     const verbosity = result.verbosity ?? 3;
-    chrome.runtime.sendMessage(
-      { type: MSG_DEFINE, selectedText, pageContext, exactMode, verbosity },
-      (response) => {
-        if (currentHost !== hostAtCreation) return;
-
-        if (chrome.runtime.lastError) {
-          stateManager?.setDefinitions([], "Something went wrong.");
-          return;
-        }
-
-        if (response?.skip) {
-          removePopup();
-          return;
-        }
-
-        if (response?.error) {
-          stateManager?.setDefinitions(response.definitions || [], response.error);
-        } else if (response?.definitions?.length) {
-          stateManager?.setDefinitions(response.definitions);
-        } else {
-          stateManager?.setDefinitions([], "Something went wrong.");
-        }
-      }
+    const quietMode = result.quietMode !== false;
+    const response = await sendMessageWithTimeout(
+      { type: MSG_DEFINE, selectedText, pageContext, exactMode, verbosity }
     );
+    if (currentHost !== hostAtCreation) return;
+
+    if (!response) {
+      if (quietMode) { removePopup(); return; }
+      stateManager?.setDefinitions([], "Definition timed out. Please try again.");
+      return;
+    }
+
+    if (response.skip) {
+      removePopup();
+      return;
+    }
+
+    if (response.error) {
+      if (quietMode && (!response.definitions || response.definitions.length === 0)) {
+        removePopup();
+        return;
+      }
+      stateManager?.setDefinitions(response.definitions || [], quietMode ? undefined : response.error);
+    } else if (response.definitions?.length) {
+      stateManager?.setDefinitions(response.definitions);
+    } else {
+      if (quietMode) { removePopup(); return; }
+      stateManager?.setDefinitions([], "No response received. Try again.");
+    }
   });
+}
+
+// Show popup on mouse text selection
+document.addEventListener("mouseup", (e: MouseEvent) => {
+  if (Date.now() - lastButtonActionTime < 100) return;
+  if (currentHost && (e.target === currentHost || e.composedPath().includes(currentHost))) return;
+  // Cancel pending selectionchange timer — mouseup handles it immediately
+  if (selectionChangeTimer) { clearTimeout(selectionChangeTimer); selectionChangeTimer = null; }
+  handleSelection();
+});
+
+// Show popup on touch text selection
+document.addEventListener("touchend", () => {
+  if (Date.now() - lastButtonActionTime < 100) return;
+  // Cancel pending selectionchange timer — touchend handles it immediately
+  if (selectionChangeTimer) { clearTimeout(selectionChangeTimer); selectionChangeTimer = null; }
+  handleSelection();
+});
+
+// Show popup on keyboard text selection (Shift+arrow, Ctrl+A, etc.)
+let selectionChangeTimer: ReturnType<typeof setTimeout> | null = null;
+document.addEventListener("selectionchange", () => {
+  if (selectionChangeTimer) clearTimeout(selectionChangeTimer);
+  selectionChangeTimer = setTimeout(() => {
+    selectionChangeTimer = null;
+    handleSelection();
+  }, 300);
 });
 
 // --- PDF embed detection ---

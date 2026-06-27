@@ -25,10 +25,10 @@ export function isPartialWordSelection(selection: Selection): boolean {
   }
 
   if (startContainer instanceof Text && startOffset > 0) {
-    if (/[a-zA-Z]/.test(startContainer.data[startOffset - 1])) return true;
+    if (/\p{L}/u.test(startContainer.data[startOffset - 1])) return true;
   }
   if (endContainer instanceof Text && endOffset < endContainer.data.length) {
-    if (/[a-zA-Z]/.test(endContainer.data[endOffset])) return true;
+    if (/\p{L}/u.test(endContainer.data[endOffset])) return true;
   }
   return false;
 }
@@ -37,9 +37,12 @@ export function isValidSelection(selectedText: string): boolean {
   const words = selectedText.split(/\s+/);
   if (words.length > 5) return false;
   if (words.length === 1) {
-    if (!/^[a-zA-Z][a-zA-Z'\-]*$/.test(selectedText)) return false;
+    if (!/^\p{L}[\p{L}'\-]*$/u.test(selectedText)) return false;
     if (isGibberish(selectedText)) return false;
   }
-  if (!/[a-zA-Z]/.test(selectedText)) return false;
+  if (words.length > 1) {
+    if (!words.every(w => /^\p{L}[\p{L}'\-]*$/u.test(w) && !isGibberish(w))) return false;
+  }
+  if (!/\p{L}/u.test(selectedText)) return false;
   return true;
 }

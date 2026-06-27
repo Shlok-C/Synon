@@ -1,7 +1,8 @@
 import { isCommonWord } from "./common-words";
 import { noun, verb, adjective } from "wink-lemmatizer";
+import lexicon from "wink-lexicon/src/wn-words.js";
 import type { Definition, DefineResponse } from "./shared/types";
-import { classify } from "./shared/validation";
+import { classify, normalizeSelection } from "./shared/validation";
 import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED } from "./shared/messages";
 
 // --- Definition cache ---
@@ -37,6 +38,11 @@ function setCache(key: string, response: DefineResponse): void {
   definitionCache.set(key, { response, timestamp: Date.now() });
 }
 
+// --- Lexicon validation ---
+function isInLexicon(word: string): boolean {
+  return lexicon[word.toLowerCase()] !== undefined;
+}
+
 // --- Lemmatization ---
 function lemmatize(word: string): string[] {
   const lower = word.toLowerCase();
@@ -69,10 +75,23 @@ function truncateByVerbosity(text: string, verbosity: number): string {
   return truncated || text;
 }
 
+// --- Fetch with timeout ---
+async function fetchWithTimeout(
+  url: string, options?: RequestInit, timeoutMs = 8000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // --- Lookup functions ---
 async function lookupDictionary(word: string): Promise<{ text: string; url: string } | null> {
   try {
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`
     );
     if (!resp.ok) return null;
@@ -93,7 +112,9 @@ async function lookupDictionary(word: string): Promise<{ text: string; url: stri
 
     const url = entry.sourceUrls?.[0] || `https://en.wiktionary.org/wiki/${encodeURIComponent(word)}`;
     return { text: lines.join("\n"), url };
-  } catch {
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw new Error("TIMEOUT");
+    if (err instanceof TypeError) throw new Error("NETWORK");
     return null;
   }
 }
@@ -102,7 +123,7 @@ const WIKI_DISAMBIG_MAX = 5;
 
 async function fetchWikiSummary(title: string): Promise<{ title: string; text: string; url: string } | null> {
   try {
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`
     );
     if (!resp.ok) return null;
@@ -112,7 +133,9 @@ async function fetchWikiSummary(title: string): Promise<{ title: string; text: s
     if (!extract || extract.length <= 10) return null;
     const url = data.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`;
     return { title: data.title || title, text: extract, url };
-  } catch {
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw new Error("TIMEOUT");
+    if (err instanceof TypeError) throw new Error("NETWORK");
     return null;
   }
 }
@@ -120,7 +143,7 @@ async function fetchWikiSummary(title: string): Promise<{ title: string; text: s
 async function fetchDisambiguationEntries(title: string): Promise<string[]> {
   try {
     // Try section 0 first (the "most commonly refers to" entries)
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `https://en.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(title)}&prop=wikitext&section=0&format=json&origin=*`
     );
     if (!resp.ok) return [];
@@ -132,7 +155,7 @@ async function fetchDisambiguationEntries(title: string): Promise<string[]> {
     if (links.length === 0) {
       const sectionLinks: string[] = [];
       for (let s = 1; s <= 3; s++) {
-        const sResp = await fetch(
+        const sResp = await fetchWithTimeout(
           `https://en.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(title)}&prop=wikitext&section=${s}&format=json&origin=*`
         );
         if (!sResp.ok) break;
@@ -145,33 +168,36 @@ async function fetchDisambiguationEntries(title: string): Promise<string[]> {
     }
 
     return links.slice(0, WIKI_DISAMBIG_MAX);
-  } catch {
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw new Error("TIMEOUT");
+    if (err instanceof TypeError) throw new Error("NETWORK");
     return [];
   }
 }
 
 function parseWikitextLinks(wikitext: string): string[] {
-  const linkRegex = /\[\[([^|\]]+?)(?:\|[^\]]+?)?\]\]/;
   const links: string[] = [];
   for (const line of wikitext.split("\n")) {
     const trimmed = line.trimStart();
     // Only consider top-level bullets (starts with * but not **)
     if (!trimmed.startsWith("*") || trimmed.startsWith("**")) continue;
-    const match = linkRegex.exec(trimmed);
-    if (!match) continue;
-    const target = match[1].trim();
-    // Skip non-article links
-    if (target.startsWith("wikt:") || target.startsWith("Category:") ||
-        target.startsWith("File:") || target.startsWith("Help:") ||
-        target.startsWith("Wikipedia:")) continue;
-    if (!links.includes(target)) links.push(target);
+    const linkRegex = /\[\[([^|\]]+?)(?:\|[^\]]+?)?\]\]/g;
+    let match: RegExpExecArray | null;
+    while ((match = linkRegex.exec(trimmed)) !== null) {
+      const target = match[1].trim();
+      // Skip non-article links
+      if (target.startsWith("wikt:") || target.startsWith("Category:") ||
+          target.startsWith("File:") || target.startsWith("Help:") ||
+          target.startsWith("Wikipedia:")) continue;
+      if (!links.includes(target)) links.push(target);
+    }
   }
   return links;
 }
 
 async function lookupWikipedia(text: string): Promise<{ title: string; text: string; url: string }[]> {
   try {
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(text)}`
     );
     if (!resp.ok) return [];
@@ -214,7 +240,9 @@ async function lookupWikipedia(text: string): Promise<{ title: string; text: str
       return true;
     });
     return [primary, ...additional].slice(0, WIKI_DISAMBIG_MAX);
-  } catch {
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw new Error("TIMEOUT");
+    if (err instanceof TypeError) throw new Error("NETWORK");
     return [];
   }
 }
@@ -227,7 +255,7 @@ async function lookupAI(
   if (!apiKey) return null;
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -247,12 +275,19 @@ async function lookupAI(
           },
         ],
       }),
-    });
+    }, 15000);
 
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) throw new Error("API_KEY_INVALID");
+      throw new Error("API_ERROR");
+    }
     const data = await response.json();
     const text = data?.content?.[0]?.text;
     return text || null;
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.message === "API_KEY_INVALID") throw err;
+    if (err?.name === "AbortError") throw new Error("TIMEOUT");
+    if (err instanceof TypeError) throw new Error("NETWORK");
     console.error("Synon API error:", err);
     return null;
   }
@@ -291,7 +326,7 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "synon-define" || !info.selectionText) return;
 
-  const selectedText = info.selectionText.trim();
+  const selectedText = normalizeSelection(info.selectionText.trim());
   if (!selectedText) return;
 
   const result = await handleDefine(selectedText, "", true);
@@ -338,6 +373,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
+// --- In-flight request deduplication ---
+const inFlightRequests = new Map<string, Promise<DefineResponse>>();
+
 // --- Core define handler ---
 async function handleDefine(
   selectedText: string,
@@ -345,11 +383,26 @@ async function handleDefine(
   exactMode: boolean = false,
   verbosity: number = 3
 ): Promise<DefineResponse> {
-  // Check cache first
   const cacheKey = getCacheKey(selectedText, exactMode, verbosity);
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
+  const existing = inFlightRequests.get(cacheKey);
+  if (existing) return existing;
+
+  const promise = handleDefineInner(selectedText, pageContext, exactMode, verbosity, cacheKey);
+  inFlightRequests.set(cacheKey, promise);
+  promise.finally(() => inFlightRequests.delete(cacheKey));
+  return promise;
+}
+
+async function handleDefineInner(
+  selectedText: string,
+  pageContext: string,
+  exactMode: boolean,
+  verbosity: number,
+  cacheKey: string
+): Promise<DefineResponse> {
   const type = classify(selectedText);
   if (type === "invalid") {
     return { definitions: [], error: "Please select a valid word or phrase." };
@@ -367,59 +420,79 @@ async function handleDefine(
     }
   }
 
-  const [dictResult, wikiResults] = await Promise.all([
-    lookupDictionary(selectedText),
-    lookupWikipedia(selectedText),
-  ]);
-
-  const definitions: Definition[] = [];
-
-  // Deduplicate: drop dictionary if Wikipedia has a direct (non-disambiguation) article match
-  const hasDirectWikiMatch = wikiResults.some(
-    (wr) => wr.title.toLowerCase() === selectedText.toLowerCase()
-  );
-  if (dictResult && !hasDirectWikiMatch) {
-    definitions.push({ source: "Dictionary", text: dictResult.text, url: dictResult.url });
-  }
-  for (const wr of wikiResults) {
-    definitions.push({ source: "Wikipedia", text: truncateByVerbosity(wr.text, verbosity), url: wr.url, title: wr.title });
-  }
-
-  if (definitions.length === 0 && type === "word") {
-    const lemmas = lemmatize(selectedText);
-    for (const lemma of lemmas) {
-      const [lemmaDict, lemmaWiki] = await Promise.all([
-        lookupDictionary(lemma),
-        lookupWikipedia(lemma),
-      ]);
-      if (lemmaDict) definitions.push({ source: "Dictionary", text: lemmaDict.text, url: lemmaDict.url, rootWord: lemma });
-      for (const lw of lemmaWiki) {
-        definitions.push({ source: "Wikipedia", text: truncateByVerbosity(lw.text, verbosity), url: lw.url, rootWord: lemma, title: lw.title });
+  try {
+    // Lexicon gate: unknown single words get only a Dictionary API check
+    if (type === "word" && !isInLexicon(selectedText)) {
+      const lemmas = lemmatize(selectedText);
+      if (!lemmas.some(l => isInLexicon(l))) {
+        const dictResult = await lookupDictionary(selectedText);
+        if (dictResult) {
+          const response: DefineResponse = {
+            definitions: [{ source: "Dictionary", text: dictResult.text, url: dictResult.url }],
+          };
+          setCache(cacheKey, response);
+          return response;
+        }
+        return { definitions: [], skip: true };
       }
-      if (definitions.length > 0) break;
     }
-  }
 
-  if (definitions.length === 0) {
-    const aiResult = await lookupAI(selectedText, pageContext);
-    if (aiResult) {
-      definitions.push({ source: "AI", text: aiResult, url: null });
+    const [dictResult, wikiResults] = await Promise.all([
+      lookupDictionary(selectedText),
+      lookupWikipedia(selectedText),
+    ]);
+
+    const definitions: Definition[] = [];
+
+    if (dictResult) {
+      definitions.push({ source: "Dictionary", text: dictResult.text, url: dictResult.url });
     }
-  }
+    for (const wr of wikiResults) {
+      definitions.push({ source: "Wikipedia", text: truncateByVerbosity(wr.text, verbosity), url: wr.url, title: wr.title });
+    }
 
-  if (definitions.length === 0) {
-    const hasKey = !!(await getApiKey());
-    return {
-      definitions: [],
-      error: hasKey
-        ? "No definition found."
-        : "No definition found, and no API key set for AI fallback. Click the Synon icon to add one.",
-    };
-  }
+    if (definitions.length === 0 && type === "word") {
+      const lemmas = lemmatize(selectedText);
+      for (const lemma of lemmas) {
+        const [lemmaDict, lemmaWiki] = await Promise.all([
+          lookupDictionary(lemma),
+          lookupWikipedia(lemma),
+        ]);
+        if (lemmaDict) definitions.push({ source: "Dictionary", text: lemmaDict.text, url: lemmaDict.url, rootWord: lemma });
+        for (const lw of lemmaWiki) {
+          definitions.push({ source: "Wikipedia", text: truncateByVerbosity(lw.text, verbosity), url: lw.url, rootWord: lemma, title: lw.title });
+        }
+        if (definitions.length > 0) break;
+      }
+    }
 
-  const response: DefineResponse = { definitions };
-  setCache(cacheKey, response);
-  return response;
+    if (definitions.length === 0) {
+      const aiResult = await lookupAI(selectedText, pageContext);
+      if (aiResult) {
+        definitions.push({ source: "AI", text: aiResult, url: null });
+      }
+    }
+
+    if (definitions.length === 0) {
+      const hasKey = !!(await getApiKey());
+      return {
+        definitions: [],
+        error: hasKey
+          ? "No definition found."
+          : "No definition found, and no API key set for AI fallback. Click the Synon icon to add one.",
+      };
+    }
+
+    const response: DefineResponse = { definitions };
+    setCache(cacheKey, response);
+    return response;
+  } catch (err: any) {
+    const msg = err?.message;
+    if (msg === "TIMEOUT") return { definitions: [], error: "Request timed out. Please try again." };
+    if (msg === "NETWORK") return { definitions: [], error: "Network error. Check your connection." };
+    if (msg === "API_KEY_INVALID") return { definitions: [], error: "API key is invalid or expired. Update it in Synon settings." };
+    return { definitions: [], error: "Something went wrong." };
+  }
 }
 
 async function getApiKey(): Promise<string | null> {
