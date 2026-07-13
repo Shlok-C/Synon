@@ -1,6 +1,6 @@
 node_modules/
 dist/
-pdfjs/
+/pdfjs/
 *.tsbuildinfo
 
 # ai tools
