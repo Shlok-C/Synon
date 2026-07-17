@@ -96,6 +96,7 @@
     errorEl.style.display = "none";
     viewerEl.innerHTML = "";
     toolbarEl.style.display = "none";
+    scale = 1.5; // open at 100% zoom
 
     try {
       pdf = await pdfjsLib.getDocument(pdfUrl).promise;
@@ -128,9 +129,6 @@
     // Build sidebar content in parallel; they don't block viewer interaction
     buildThumbnailPane();
     buildOutline(pdf).then(renderOutline);
-
-    // Start toolbar auto-hide cycle
-    scheduleHide();
   }
 
   // --- Page tracking ---
@@ -179,7 +177,6 @@
       scrollRaf = null;
       updateCurrentPage();
     });
-    showToolbar();
   });
 
   function updateZoomLabel() {
@@ -246,6 +243,22 @@
     );
   }
 
+  // --- Free-canvas side margins ---
+  const EDGE_VISIBLE = 50; // px of the page edge that stays visible at a pan extreme
+
+  function applyCanvasPadding() {
+    if (viewMode === "grid") {
+      viewerEl.style.removeProperty("--side-pad");
+      return;
+    }
+    const pad = Math.max(0, viewerScrollEl.clientWidth - EDGE_VISIBLE);
+    viewerEl.style.setProperty("--side-pad", pad + "px");
+  }
+
+  function centerHorizontally() {
+    viewerScrollEl.scrollLeft = (viewerScrollEl.scrollWidth - viewerScrollEl.clientWidth) / 2;
+  }
+
   async function initViewer() {
     viewerEl.innerHTML = "";
     pageContainers.length = 0;
@@ -279,6 +292,9 @@
 
     observer = createObserver();
     for (const container of pageContainers) observer.observe(container);
+
+    applyCanvasPadding();
+    centerHorizontally();
   }
 
   async function rerender() {
@@ -321,10 +337,14 @@
     }
 
     requestAnimationFrame(() => {
+      applyCanvasPadding();
+      const left = (scrollEl.scrollWidth - scrollEl.clientWidth) / 2;
       const anchor = pageContainers[anchorIndex];
       if (anchor) {
         const newTop = anchor.offsetTop - viewerEl.offsetTop;
-        scrollEl.scrollTo(0, newTop + anchorFraction * anchor.offsetHeight);
+        scrollEl.scrollTo(left, newTop + anchorFraction * anchor.offsetHeight);
+      } else {
+        scrollEl.scrollLeft = left;
       }
     });
 
@@ -437,6 +457,43 @@
       else zoomOut();
     }
   }, { passive: false });
+
+  // --- Middle-mouse grab/pan ---
+  let isPanning = false;
+  let panStartX = 0, panStartY = 0, panStartLeft = 0, panStartTop = 0;
+
+  function endPan() {
+    if (!isPanning) return;
+    isPanning = false;
+    document.body.classList.remove("panning");
+  }
+
+  viewerScrollEl.addEventListener("mousedown", (e) => {
+    if (e.button !== 1) return;
+    e.preventDefault(); // suppress Chrome's native middle-click autoscroll
+    isPanning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    panStartLeft = viewerScrollEl.scrollLeft;
+    panStartTop = viewerScrollEl.scrollTop;
+    document.body.classList.add("panning");
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!isPanning) return;
+    e.preventDefault();
+    viewerScrollEl.scrollLeft = panStartLeft - (e.clientX - panStartX);
+    viewerScrollEl.scrollTop = panStartTop - (e.clientY - panStartY);
+  });
+
+  document.addEventListener("mouseup", endPan);
+  document.addEventListener("mouseleave", endPan);
+  window.addEventListener("blur", endPan);
+
+  window.addEventListener("resize", () => {
+    applyCanvasPadding();
+    centerHorizontally();
+  });
 
   // --- Sidebar tabs + toggle ---
   function applySidebarState() {
@@ -912,32 +969,7 @@
     setTimeout(() => goToPage(pageNum), 150);
   });
 
-  // --- Toolbar auto-hide ---
-  const HIDE_DELAY = 2000;
-  const TOP_HOVER_ZONE = 60;
-  let toolbarHideTimer = null;
-  let mouseY = 9999;
-
-  function showToolbar() {
-    toolbarEl.setAttribute("data-hidden", "false");
-    scheduleHide();
-  }
-
-  function scheduleHide() {
-    if (toolbarHideTimer) clearTimeout(toolbarHideTimer);
-    toolbarHideTimer = setTimeout(() => {
-      toolbarHideTimer = null;
-      if (mouseY <= TOP_HOVER_ZONE) { scheduleHide(); return; }
-      if (document.activeElement === pageInputEl) { scheduleHide(); return; }
-      if (!moreMenuEl.hidden) { scheduleHide(); return; }
-      toolbarEl.setAttribute("data-hidden", "true");
-    }, HIDE_DELAY);
-  }
-
-  document.addEventListener("mousemove", (e) => {
-    mouseY = e.clientY;
-    if (e.clientY <= TOP_HOVER_ZONE) showToolbar();
-  });
+  // Toolbar is always visible (no auto-hide); it stays at data-hidden="false".
 
   // --- Startup ---
   await loadSettings();
