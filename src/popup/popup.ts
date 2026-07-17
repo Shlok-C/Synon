@@ -52,7 +52,7 @@ verbositySlider.addEventListener("input", () => {
 });
 
 function isValidApiKeyFormat(key: string): boolean {
-  return key.startsWith("sk-ant-") && key.length >= 40;
+  return key.startsWith("sk-or-") && key.length >= 40;
 }
 
 saveButton.addEventListener("click", () => {
@@ -62,7 +62,7 @@ saveButton.addEventListener("click", () => {
     return;
   }
   if (!isValidApiKeyFormat(key)) {
-    statusDiv.textContent = "Invalid format. Anthropic keys start with sk-ant-";
+    statusDiv.textContent = "Invalid format. OpenRouter keys start with sk-or-";
     return;
   }
 
@@ -78,24 +78,13 @@ testButton.addEventListener("click", async () => {
     return;
   }
   if (!isValidApiKeyFormat(key)) {
-    statusDiv.textContent = "Invalid format. Anthropic keys start with sk-ant-";
+    statusDiv.textContent = "Invalid format. OpenRouter keys start with sk-or-";
     return;
   }
   statusDiv.textContent = "Testing...";
   try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1,
-        messages: [{ role: "user", content: "hi" }],
-      }),
+    const resp = await fetch("https://openrouter.ai/api/v1/models", {
+      headers: { "Authorization": `Bearer ${key}` },
     });
     statusDiv.textContent = resp.ok ? "Key is valid!" : "Key rejected by API.";
   } catch {

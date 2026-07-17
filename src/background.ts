@@ -15,8 +15,15 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const CACHE_MAX = 200;
 const definitionCache = new Map<string, CacheEntry>();
 
-function getCacheKey(text: string, exactMode: boolean, verbosity: number): string {
-  return text.toLowerCase() + "|" + (exactMode ? "1" : "0") + "|v" + verbosity;
+function hashContext(context: string): string {
+  const slice = context.slice(0, 1000);
+  let h = 5381;
+  for (let i = 0; i < slice.length; i++) h = ((h << 5) + h + slice.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function getCacheKey(text: string, exactMode: boolean, verbosity: number, pageContext: string): string {
+  return text.toLowerCase() + "|" + (exactMode ? "1" : "0") + "|v" + verbosity + "|c" + hashContext(pageContext);
 }
 
 function getCached(key: string): DefineResponse | null {
@@ -247,33 +254,26 @@ async function lookupWikipedia(text: string): Promise<{ title: string; text: str
   }
 }
 
-async function lookupAI(
-  selectedText: string,
-  pageContext: string
-): Promise<string | null> {
-  const apiKey = await getApiKey();
-  if (!apiKey) return null;
+const OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 
+async function callOpenRouter(
+  apiKey: string,
+  userContent: string,
+  maxTokens: number
+): Promise<string | null> {
   try {
-    const response = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
+    const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
+        "Authorization": `Bearer ${apiKey}`,
+        "HTTP-Referer": "chrome-extension://synon",
+        "X-Title": "Synon",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 256,
-        messages: [
-          {
-            role: "user",
-            content: pageContext && pageContext.length > 50
-              ? `Define "${selectedText}" in the context of this page:\n\n${pageContext}`
-              : `Define "${selectedText}" concisely. Provide the most common meaning.`,
-          },
-        ],
+        model: OPENROUTER_MODEL,
+        max_tokens: maxTokens,
+        messages: [{ role: "user", content: userContent }],
       }),
     }, 15000);
 
@@ -282,15 +282,58 @@ async function lookupAI(
       throw new Error("API_ERROR");
     }
     const data = await response.json();
-    const text = data?.content?.[0]?.text;
-    return text || null;
+    const text = data?.choices?.[0]?.message?.content;
+    return typeof text === "string" ? text : null;
   } catch (err: any) {
     if (err?.message === "API_KEY_INVALID") throw err;
     if (err?.name === "AbortError") throw new Error("TIMEOUT");
     if (err instanceof TypeError) throw new Error("NETWORK");
-    console.error("Synon API error:", err);
+    console.error("Synon OpenRouter error:", err);
     return null;
   }
+}
+
+async function lookupAI(
+  selectedText: string,
+  pageContext: string
+): Promise<string | null> {
+  const apiKey = await getApiKey();
+  if (!apiKey) return null;
+
+  const prompt = pageContext && pageContext.length > 50
+    ? `Define "${selectedText}" in the context of this page:\n\n${pageContext}`
+    : `Define "${selectedText}" concisely. Provide the most common meaning.`;
+
+  return callOpenRouter(apiKey, prompt, 256);
+}
+
+async function pickBestDefinition(
+  selectedText: string,
+  pageContext: string,
+  candidates: Definition[],
+  apiKey: string
+): Promise<number | null> {
+  const trimmedContext = pageContext.trim().slice(0, 2000);
+  const numbered = candidates
+    .map((d, i) => `${i + 1}. ${d.text.replace(/\s+/g, " ").slice(0, 400)}`)
+    .join("\n");
+
+  const prompt =
+`You are helping a reader understand "${selectedText}" as used in this context:
+
+${trimmedContext}
+
+Which numbered definition below best matches the meaning in that context? Reply with ONLY the number.
+
+${numbered}`;
+
+  const reply = await callOpenRouter(apiKey, prompt, 8);
+  if (!reply) return null;
+  const match = reply.match(/\d+/);
+  if (!match) return null;
+  const n = parseInt(match[0], 10);
+  if (!Number.isFinite(n) || n < 1 || n > candidates.length) return null;
+  return n - 1;
 }
 
 // --- PDF detection helpers ---
@@ -383,7 +426,7 @@ async function handleDefine(
   exactMode: boolean = false,
   verbosity: number = 3
 ): Promise<DefineResponse> {
-  const cacheKey = getCacheKey(selectedText, exactMode, verbosity);
+  const cacheKey = getCacheKey(selectedText, exactMode, verbosity, pageContext);
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
@@ -479,8 +522,23 @@ async function handleDefineInner(
         definitions: [],
         error: hasKey
           ? "No definition found."
-          : "No definition found, and no API key set for AI fallback. Click the Synon icon to add one.",
+          : "No definition found, and no OpenRouter API key set for AI fallback. Click the Synon icon to add one.",
       };
+    }
+
+    if (definitions.length >= 2 && pageContext.trim().length >= 50) {
+      const apiKey = await getApiKey();
+      if (apiKey) {
+        try {
+          const pick = await pickBestDefinition(selectedText, pageContext, definitions, apiKey);
+          if (pick !== null && pick > 0) {
+            const [chosen] = definitions.splice(pick, 1);
+            definitions.unshift(chosen);
+          }
+        } catch {
+          // Rate-limit, timeout, or bad key — keep original ordering.
+        }
+      }
     }
 
     const response: DefineResponse = { definitions };
