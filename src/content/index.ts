@@ -2,7 +2,7 @@ import type { Definition, DefineResponse } from "../shared/types";
 import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED } from "../shared/messages";
 import { getPageContext } from "./context";
 import { createPositionTracker } from "./positioning";
-import { isPartialWordSelection, isValidSelection } from "./selection";
+import { isPartialWordSelection, isValidSelection, isEditableContext } from "./selection";
 import { normalizeSelection } from "../shared/validation";
 import { buildPopupDOM } from "./popup-ui";
 import { createPopupStateManager, type PopupStateManager } from "./popup-state";
@@ -32,6 +32,15 @@ const positionTracker = createPositionTracker();
 let stateManager: PopupStateManager | null = null;
 let lastButtonActionTime = 0;
 let lastHandledSelection: { text: string; time: number } = { text: "", time: 0 };
+let lastEditTime = 0;
+
+// Track edits (typed or deleted characters) in any editable surface. This is the
+// "user is actively typing" signal; it also dismisses an open popup the instant
+// the user resumes editing (e.g. selecting a word then pressing Backspace).
+document.addEventListener("input", () => {
+  lastEditTime = Date.now();
+  if (currentHost) removePopup();
+}, true);
 
 function removePopup(): void {
   positionTracker.detach();
@@ -214,6 +223,10 @@ function handleSelection(): void {
   if (isPartialWordSelection(selection)) return;
 
   if (!isValidSelection(selectedText)) return;
+
+  // Don't define while editing: suppress in an editable surface if the user typed recently.
+  const TYPING_IDLE_MS = 1500;
+  if (isEditableContext(selection) && Date.now() - lastEditTime < TYPING_IDLE_MS) return;
 
   const range = selection.getRangeAt(0).cloneRange();
 

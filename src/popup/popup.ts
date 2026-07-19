@@ -7,6 +7,27 @@ const verbositySlider = document.getElementById("verbosity") as HTMLInputElement
 const verbosityLabel = document.getElementById("verbosityLabel") as HTMLSpanElement;
 const quietModeCheckbox = document.getElementById("quietMode") as HTMLInputElement;
 const pdfViewerCheckbox = document.getElementById("pdfViewer") as HTMLInputElement;
+const pdfPerfSection = document.getElementById("pdfPerf") as HTMLDivElement;
+const pdfStreamingCheckbox = document.getElementById("pdfStreaming") as HTMLInputElement;
+const pdfRenderWindowSlider = document.getElementById("pdfRenderWindow") as HTMLInputElement;
+const pdfRenderWindowLabel = document.getElementById("pdfRenderWindowLabel") as HTMLSpanElement;
+const pdfOutlineCapSlider = document.getElementById("pdfOutlineCap") as HTMLInputElement;
+const pdfOutlineCapLabel = document.getElementById("pdfOutlineCapLabel") as HTMLSpanElement;
+
+const PDF_RENDER_WINDOW_DEFAULT = 6;
+const PDF_OUTLINE_CAP_DEFAULT = 250;
+
+function updateRenderWindowLabel(value: string): void {
+  pdfRenderWindowLabel.textContent = `${value} each side`;
+}
+
+function updateOutlineCapLabel(value: string): void {
+  pdfOutlineCapLabel.textContent = `${value} pages`;
+}
+
+function syncPdfPerfVisibility(): void {
+  pdfPerfSection.hidden = !pdfViewerCheckbox.checked;
+}
 
 const VERBOSITY_LABELS: Record<string, string> = {
   "1": "Minimal",
@@ -21,18 +42,31 @@ function updateVerbosityLabel(value: string): void {
 }
 
 // Load saved settings on popup open
-chrome.storage.sync.get(["apiKey", "exactMode", "quietMode", "verbosity", "pdfViewerEnabled"], (result) => {
-  if (result.apiKey) {
-    apiKeyInput.value = result.apiKey;
-    statusDiv.textContent = "API key is saved.";
+chrome.storage.sync.get(
+  ["apiKey", "exactMode", "quietMode", "verbosity", "pdfViewerEnabled", "pdfStreaming", "pdfRenderWindow", "pdfOutlineScanCap"],
+  (result) => {
+    if (result.apiKey) {
+      apiKeyInput.value = result.apiKey;
+      statusDiv.textContent = "API key is saved.";
+    }
+    exactModeCheckbox.checked = result.exactMode === true;
+    quietModeCheckbox.checked = result.quietMode !== false; // default true
+    const v = result.verbosity ?? 3;
+    verbositySlider.value = String(v);
+    updateVerbosityLabel(String(v));
+    pdfViewerCheckbox.checked = result.pdfViewerEnabled !== false; // default true
+
+    pdfStreamingCheckbox.checked = result.pdfStreaming !== false; // default true
+    const rw = result.pdfRenderWindow ?? PDF_RENDER_WINDOW_DEFAULT;
+    pdfRenderWindowSlider.value = String(rw);
+    updateRenderWindowLabel(String(rw));
+    const cap = result.pdfOutlineScanCap ?? PDF_OUTLINE_CAP_DEFAULT;
+    pdfOutlineCapSlider.value = String(cap);
+    updateOutlineCapLabel(String(cap));
+
+    syncPdfPerfVisibility();
   }
-  exactModeCheckbox.checked = result.exactMode === true;
-  quietModeCheckbox.checked = result.quietMode !== false; // default true
-  const v = result.verbosity ?? 3;
-  verbositySlider.value = String(v);
-  updateVerbosityLabel(String(v));
-  pdfViewerCheckbox.checked = result.pdfViewerEnabled !== false; // default true
-});
+);
 
 exactModeCheckbox.addEventListener("change", () => {
   chrome.storage.sync.set({ exactMode: exactModeCheckbox.checked });
@@ -44,6 +78,21 @@ quietModeCheckbox.addEventListener("change", () => {
 
 pdfViewerCheckbox.addEventListener("change", () => {
   chrome.storage.sync.set({ pdfViewerEnabled: pdfViewerCheckbox.checked });
+  syncPdfPerfVisibility();
+});
+
+pdfStreamingCheckbox.addEventListener("change", () => {
+  chrome.storage.sync.set({ pdfStreaming: pdfStreamingCheckbox.checked });
+});
+
+pdfRenderWindowSlider.addEventListener("input", () => {
+  updateRenderWindowLabel(pdfRenderWindowSlider.value);
+  chrome.storage.sync.set({ pdfRenderWindow: parseInt(pdfRenderWindowSlider.value, 10) });
+});
+
+pdfOutlineCapSlider.addEventListener("input", () => {
+  updateOutlineCapLabel(pdfOutlineCapSlider.value);
+  chrome.storage.sync.set({ pdfOutlineScanCap: parseInt(pdfOutlineCapSlider.value, 10) });
 });
 
 verbositySlider.addEventListener("input", () => {

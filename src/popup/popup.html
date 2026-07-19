@@ -69,6 +69,28 @@
       color: #888;
       min-width: 55px;
     }
+    .slider-val {
+      font-size: 12px;
+      color: #888;
+      min-width: 72px;
+      text-align: right;
+    }
+    .hint {
+      font-size: 12px;
+      color: #888;
+      margin-top: 4px;
+    }
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid #e8e8e8;
+    }
+    #pdfPerf[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -106,6 +128,37 @@
     </label>
   </div>
   <div id="pdfViewerDesc" style="font-size:12px;color:#888;margin-top:4px;">When on, PDFs open in Synon's viewer with text selection support.</div>
+
+  <div id="pdfPerf">
+    <div class="section-title">PDF Performance</div>
+
+    <div class="toggle-row">
+      <label for="pdfStreaming">
+        <input type="checkbox" id="pdfStreaming" />
+        Stream large PDFs
+      </label>
+    </div>
+    <div class="hint">When on, only viewed pages are fetched first — faster to open big files.</div>
+
+    <div class="toggle-row">
+      <label for="pdfRenderWindow">Pages kept in memory</label>
+    </div>
+    <div class="slider-row">
+      <input type="range" id="pdfRenderWindow" min="2" max="20" step="1" value="6" />
+      <span class="slider-val" id="pdfRenderWindowLabel">6 each side</span>
+    </div>
+    <div class="hint">Lower uses less memory on large PDFs; higher re-renders less while scrolling.</div>
+
+    <div class="toggle-row">
+      <label for="pdfOutlineCap">Auto-build outline under</label>
+    </div>
+    <div class="slider-row">
+      <input type="range" id="pdfOutlineCap" min="50" max="1000" step="50" value="250" />
+      <span class="slider-val" id="pdfOutlineCapLabel">250 pages</span>
+    </div>
+    <div class="hint">Above this page count, the outline is built on demand instead of automatically.</div>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>

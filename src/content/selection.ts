@@ -33,6 +33,24 @@ export function isPartialWordSelection(selection: Selection): boolean {
   return false;
 }
 
+// True if the selection sits inside an editable surface (rich-text editor, email
+// compose box, contenteditable region, or a focused input/textarea). Used to
+// suppress definitions while the user is editing rather than reading.
+export function isEditableContext(selection: Selection): boolean {
+  const node = selection.focusNode ?? selection.anchorNode;
+  if (node) {
+    const el = node.nodeType === Node.ELEMENT_NODE
+      ? (node as Element)
+      : node.parentElement;
+    // isContentEditable already accounts for inherited contenteditable ancestors.
+    if (el && (el as HTMLElement).isContentEditable) return true;
+  }
+  if (document.designMode === "on") return true;
+  const active = document.activeElement;
+  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return true;
+  return false;
+}
+
 export function isValidSelection(selectedText: string): boolean {
   const words = selectedText.split(/\s+/);
   if (words.length > 5) return false;

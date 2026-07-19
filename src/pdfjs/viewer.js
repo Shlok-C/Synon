@@ -55,7 +55,15 @@
 
   const pageContainers = [];
   const renderedPages = new Set();
+  const visiblePages = new Set();
   let observer = null;
+
+  // --- Performance settings (overridable from the extension popup) ---
+  let renderWindow = 6;      // pages kept rendered on each side of the current page
+  let outlineScanCap = 250;  // above this page count, the outline scan runs on demand
+  let streamingEnabled = true; // fetch only viewed pages first (disableAutoFetch)
+  let placeholderW = "";     // current placeholder CSS width, for canvas eviction
+  let placeholderH = "";     // current placeholder CSS height, for canvas eviction
 
   const thumbContainers = [];
   const renderedThumbs = new Set();
@@ -71,7 +79,7 @@
   function loadSettings() {
     return new Promise((resolve) => {
       chrome.storage.sync.get(
-        ["pdfViewMode", "pdfSidebarOpen", "pdfSidebarTab"],
+        ["pdfViewMode", "pdfSidebarOpen", "pdfSidebarTab", "pdfStreaming", "pdfRenderWindow", "pdfOutlineScanCap"],
         (r) => {
           if (r.pdfViewMode === "two-up" || r.pdfViewMode === "grid" || r.pdfViewMode === "single") {
             viewMode = r.pdfViewMode;
@@ -79,6 +87,13 @@
           if (typeof r.pdfSidebarOpen === "boolean") sidebarOpen = r.pdfSidebarOpen;
           if (r.pdfSidebarTab === "outline" || r.pdfSidebarTab === "thumb") {
             sidebarTab = r.pdfSidebarTab;
+          }
+          if (typeof r.pdfStreaming === "boolean") streamingEnabled = r.pdfStreaming;
+          if (Number.isFinite(r.pdfRenderWindow) && r.pdfRenderWindow >= 2) {
+            renderWindow = r.pdfRenderWindow;
+          }
+          if (Number.isFinite(r.pdfOutlineScanCap) && r.pdfOutlineScanCap >= 50) {
+            outlineScanCap = r.pdfOutlineScanCap;
           }
           resolve();
         }
@@ -99,7 +114,18 @@
     scale = 1.5; // open at 100% zoom
 
     try {
-      pdf = await pdfjsLib.getDocument(pdfUrl).promise;
+      const loadingTask = pdfjsLib.getDocument({
+        url: pdfUrl,
+        rangeChunkSize: 65536,
+        disableAutoFetch: streamingEnabled,
+        disableStream: false,
+      });
+      loadingTask.onProgress = ({ loaded, total }) => {
+        loadingEl.textContent = total
+          ? "Loading PDF… " + Math.round((loaded / total) * 100) + "%"
+          : "Loading PDF…";
+      };
+      pdf = await loadingTask.promise;
     } catch (err) {
       loadingEl.style.display = "none";
       errorEl.style.display = "block";
@@ -128,7 +154,7 @@
 
     // Build sidebar content in parallel; they don't block viewer interaction
     buildThumbnailPane();
-    buildOutline(pdf).then(renderOutline);
+    initOutline();
   }
 
   // --- Page tracking ---
@@ -143,26 +169,54 @@
     updatePageInfo();
     updateActiveThumb();
     updateActiveOutlineEntry();
+    evictDistantPages();
+  }
+
+  // Restore a rendered page back to a lightweight placeholder, freeing its canvas.
+  function resetToPlaceholder(index) {
+    const container = pageContainers[index];
+    if (!container) return;
+    if (container._renderTask) {
+      try { container._renderTask.cancel(); } catch {}
+      container._renderTask = null;
+    }
+    container.innerHTML = "";
+    container.className = "page-container page page-placeholder";
+    if (placeholderW) container.style.width = placeholderW;
+    if (placeholderH) container.style.height = placeholderH;
+    container.textContent = "Page " + (index + 1);
+    renderedPages.delete(index);
+  }
+
+  // Evict rendered pages farther than renderWindow from the current page.
+  function evictDistantPages() {
+    const cur = currentPage - 1;
+    for (const idx of [...renderedPages]) {
+      if (Math.abs(idx - cur) > renderWindow) resetToPlaceholder(idx);
+    }
   }
 
   function updateCurrentPage() {
-    if (pageContainers.length === 0) return;
-    const scrollTop = viewerScrollEl.scrollTop;
-    const scrollMid = scrollTop + viewerScrollEl.clientHeight / 2;
+    if (visiblePages.size === 0) return;
+    const scrollMid = viewerScrollEl.scrollTop + viewerScrollEl.clientHeight / 2;
+    // Only the handful of currently-visible pages are inspected (not all N).
     let topmostRowY = Infinity;
-    let newIdx = pageContainers.length - 1;
-    for (let i = 0; i < pageContainers.length; i++) {
+    let newIdx = -1;
+    let maxVisible = -1;
+    for (const i of visiblePages) {
       const c = pageContainers[i];
+      if (!c) continue;
+      if (i > maxVisible) maxVisible = i;
       const cTop = c.offsetTop - viewerEl.offsetTop;
       const cBottom = cTop + c.offsetHeight;
-      if (cBottom > scrollMid) {
-        if (cTop < topmostRowY) {
-          topmostRowY = cTop;
-          newIdx = i;
-        }
-        // Same row (same offsetTop) keeps the first index.
+      if (cBottom > scrollMid && (cTop < topmostRowY || (cTop === topmostRowY && i < newIdx))) {
+        topmostRowY = cTop;
+        newIdx = i;
       }
     }
+    // Near the end of the document nothing sits below the midpoint — use the last visible page.
+    if (newIdx === -1) newIdx = maxVisible;
+    if (newIdx === -1) return;
     const newPage = newIdx + 1;
     if (newPage !== currentPage) {
       currentPage = newPage;
@@ -210,11 +264,23 @@
     container.appendChild(canvas);
 
     const ctx = canvas.getContext("2d");
-    await page.render({
+    const renderTask = page.render({
       canvasContext: ctx,
       viewport,
       transform: [dpr, 0, 0, dpr, 0, 0],
-    }).promise;
+    });
+    container._renderTask = renderTask;
+    try {
+      await renderTask.promise;
+    } catch (err) {
+      if (err && err.name === "RenderingCancelledException") {
+        renderedPages.delete(index);
+        return;
+      }
+      throw err;
+    } finally {
+      if (container._renderTask === renderTask) container._renderTask = null;
+    }
 
     const textContent = await page.getTextContent();
     const textLayerDiv = document.createElement("div");
@@ -227,15 +293,27 @@
       viewport,
     });
     await textLayer.render();
+
+    // Free canvases for pages now far from the viewport.
+    evictDistantPages();
   }
 
   function createObserver() {
     return new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
+          const idx = parseInt(entry.target.getAttribute("data-page-number"), 10) - 1;
           if (entry.isIntersecting) {
-            const pageNum = parseInt(entry.target.getAttribute("data-page-number"), 10);
-            renderPage(pageNum - 1);
+            visiblePages.add(idx);
+            renderPage(idx);
+          } else {
+            visiblePages.delete(idx);
+            // Cancel a still-pending render for a page that scrolled away mid-render
+            // (_renderTask is non-null only while a render is in flight).
+            const c = pageContainers[idx];
+            if (c && c._renderTask) {
+              try { c._renderTask.cancel(); } catch {}
+            }
           }
         }
       },
@@ -263,6 +341,7 @@
     viewerEl.innerHTML = "";
     pageContainers.length = 0;
     renderedPages.clear();
+    visiblePages.clear();
     if (observer) observer.disconnect();
 
     viewerEl.style.setProperty("--scale-factor", String(effectiveScale()));
@@ -274,6 +353,8 @@
     const initDpr = window.devicePixelRatio || 1;
     const phW = (Math.ceil(defaultVp.width * initDpr) / initDpr) + "px";
     const phH = (Math.ceil(defaultVp.height * initDpr) / initDpr) + "px";
+    placeholderW = phW;
+    placeholderH = phH;
     for (let i = 0; i < pdf.numPages; i++) {
       const container = document.createElement("div");
       container.className = "page-container page page-placeholder";
@@ -316,7 +397,15 @@
     }
 
     renderedPages.clear();
+    visiblePages.clear();
     if (observer) observer.disconnect();
+    // Cancel any in-flight renders before tearing down their canvases.
+    for (const container of pageContainers) {
+      if (container._renderTask) {
+        try { container._renderTask.cancel(); } catch {}
+        container._renderTask = null;
+      }
+    }
 
     viewerEl.style.setProperty("--scale-factor", String(effectiveScale()));
     updateZoomLabel();
@@ -326,6 +415,8 @@
     const dpr = window.devicePixelRatio || 1;
     const phW = (Math.ceil(defaultVp.width * dpr) / dpr) + "px";
     const phH = (Math.ceil(defaultVp.height * dpr) / dpr) + "px";
+    placeholderW = phW;
+    placeholderH = phH;
 
     for (let i = 0; i < pageContainers.length; i++) {
       const container = pageContainers[i];
@@ -744,6 +835,8 @@
         isTocPage: toc,
         isRunningHeader: false,
       })));
+      // Yield to the event loop so scroll/zoom stay responsive during the scan.
+      if (i % 8 === 7) await new Promise((r) => setTimeout(r));
     }
 
     const allRuns = pageRuns.flat();
@@ -795,26 +888,50 @@
     return [];
   }
 
-  async function buildOutline(pdfDoc) {
-    const tree = await getOutlineEntries(pdfDoc);
-    if (tree && tree.length > 0) return tree;
+  const outlineCacheKey = () => "synon-pdf-schema:" + pdfUrl;
 
-    outlinePaneEl.innerHTML = '<div class="toc-empty">Building outline…</div>';
+  // Decide how the outline is produced: embedded TOC, cached scan, auto-scan, or on-demand.
+  async function initOutline() {
+    const tree = await getOutlineEntries(pdf);
+    if (tree && tree.length > 0) { renderOutline(tree); return; }
 
-    // Check sessionStorage cache first (keyed by PDF URL).
-    const cacheKey = "synon-pdf-schema:" + pdfUrl;
+    // Reuse a cached scan for this URL if present.
     let schema = null;
     try {
-      const cached = sessionStorage.getItem(cacheKey);
+      const cached = sessionStorage.getItem(outlineCacheKey());
       if (cached) schema = JSON.parse(cached);
     } catch {}
+    if (schema) { renderOutline(inferOutlineFromSchema(schema)); return; }
 
-    if (!schema) {
-      schema = await parseFullPdf(pdfDoc);
-      try { sessionStorage.setItem(cacheKey, JSON.stringify(schema)); } catch {}
+    // Large documents defer the scan so opening stays fast and streaming isn't defeated.
+    if (pdf.numPages > outlineScanCap) {
+      renderOutlineGenerateButton();
+      return;
     }
 
-    return inferOutlineFromSchema(schema);
+    await runOutlineScan();
+  }
+
+  async function runOutlineScan() {
+    outlinePaneEl.innerHTML = '<div class="toc-empty">Building outline…</div>';
+    const schema = await parseFullPdf(pdf);
+    try { sessionStorage.setItem(outlineCacheKey(), JSON.stringify(schema)); } catch {}
+    renderOutline(inferOutlineFromSchema(schema));
+  }
+
+  function renderOutlineGenerateButton() {
+    outlinePaneEl.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "toc-empty";
+    const msg = document.createElement("div");
+    msg.textContent = "Large document (" + pdf.numPages + " pages).";
+    const btn = document.createElement("button");
+    btn.className = "toc-generate-btn";
+    btn.textContent = "Generate outline";
+    btn.addEventListener("click", () => { btn.disabled = true; runOutlineScan(); });
+    wrap.appendChild(msg);
+    wrap.appendChild(btn);
+    outlinePaneEl.appendChild(wrap);
   }
 
   function renderOutline(tree) {
