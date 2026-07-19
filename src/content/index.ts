@@ -164,11 +164,21 @@ document.addEventListener("mousedown", (e: MouseEvent) => {
   removePopup();
 });
 
-// Dismiss on Escape
+// Keyboard control: Escape dismisses; Left/Right cycle through meanings
 document.addEventListener("keydown", (e: KeyboardEvent) => {
-  if (e.key === "Escape") {
-    removePopup();
-  }
+  if (!currentHost) return;
+
+  if (e.key === "Escape") { removePopup(); return; }
+
+  // Don't hijack arrows while the user is in a form field / editor.
+  const ae = document.activeElement as HTMLElement | null;
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+
+  const state = stateManager?.currentState;
+  if (!state || state.definitions.length <= 1) return;
+
+  if (e.key === "ArrowLeft") { e.preventDefault(); stateManager!.navigatePrev(); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); stateManager!.navigateNext(); }
 });
 
 // Handle context-menu definitions from background
