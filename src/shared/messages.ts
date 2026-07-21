@@ -1,4 +1,4 @@
-import type { Definition } from "./types";
+import type { Definition, PageKind } from "./types";
 
 export const MSG_DEFINE = "DEFINE" as const;
 export const MSG_SHOW_DEFINITION = "SHOW_DEFINITION" as const;
@@ -10,6 +10,7 @@ export interface DefineMessage {
   pageContext: string;
   exactMode: boolean;
   verbosity: number;
+  pageKind: PageKind;
 }
 
 export interface ShowDefinitionMessage {

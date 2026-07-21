@@ -1,6 +1,6 @@
 import type { Definition, DefineResponse } from "../shared/types";
-import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED } from "../shared/messages";
-import { getPageContext } from "./context";
+import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED, type DefineMessage } from "../shared/messages";
+import { getPageContext, getPageKind } from "./context";
 import { createPositionTracker } from "./positioning";
 import { isPartialWordSelection, isValidSelection, isEditableContext } from "./selection";
 import { normalizeSelection } from "../shared/validation";
@@ -33,6 +33,7 @@ let stateManager: PopupStateManager | null = null;
 let lastButtonActionTime = 0;
 let lastHandledSelection: { text: string; time: number } = { text: "", time: 0 };
 let lastEditTime = 0;
+let popupOpenedAt = 0;
 
 // Track edits (typed or deleted characters) in any editable surface. This is the
 // "user is actively typing" signal; it also dismisses an open popup the instant
@@ -50,6 +51,55 @@ function removePopup(): void {
   }
   stateManager?.reset();
   stateManager = null;
+}
+
+function getSettings(): Promise<{ exactMode: boolean; verbosity: number; quietMode: boolean }> {
+  return new Promise((resolve) => {
+    chrome.storage.sync.get(["exactMode", "verbosity", "quietMode"], (result) => {
+      resolve({
+        exactMode: result.exactMode === true,
+        verbosity: result.verbosity ?? 3,
+        quietMode: result.quietMode !== false,
+      });
+    });
+  });
+}
+
+// Shared interpretation of a DefineResponse for both the top-level and nested flows.
+function applyDefineResponse(
+  response: DefineResponse | null,
+  opts: { hostAtRequest: HTMLDivElement | null; quietMode: boolean; onSkip: () => void }
+): void {
+  const { hostAtRequest, quietMode, onSkip } = opts;
+  if (currentHost !== hostAtRequest) return;
+
+  if (!response) {
+    if (quietMode) { removePopup(); return; }
+    stateManager?.setDefinitions([], "Definition timed out. Please try again.");
+    return;
+  }
+
+  if (response.skip) { onSkip(); return; }
+
+  // Debug-inspect: expose the per-highlight schema for development.
+  if (response.schema) {
+    console.debug("[Synon] schema", response.schema);
+    if (currentHost) currentHost.dataset.synonSchema = JSON.stringify(response.schema);
+    stateManager?.setSchema(response.schema);
+  }
+
+  if (response.error) {
+    if (quietMode && (!response.definitions || response.definitions.length === 0)) {
+      removePopup();
+      return;
+    }
+    stateManager?.setDefinitions(response.definitions || [], quietMode ? undefined : response.error);
+  } else if (response.definitions?.length) {
+    stateManager?.setDefinitions(response.definitions);
+  } else {
+    if (quietMode) { removePopup(); return; }
+    stateManager?.setDefinitions([], "No response received. Try again.");
+  }
 }
 
 function showPopup(range: Range, selectedText: string): void {
@@ -88,6 +138,7 @@ function showPopup(range: Range, selectedText: string): void {
 
   document.body.appendChild(host);
   currentHost = host;
+  popupOpenedAt = Date.now();
   positionTracker.attach(elements.card, range);
 
   // Listen for text selection inside the popup (nested definitions)
@@ -117,41 +168,24 @@ function showPopup(range: Range, selectedText: string): void {
     stateManager?.pushAndLoad(text);
 
     const hostAtRequest = currentHost;
-    chrome.storage.sync.get(["exactMode", "verbosity", "quietMode"], async (result) => {
-      const exactMode = result.exactMode === true;
-      const verbosity = result.verbosity ?? 3;
-      const quietMode = result.quietMode !== false;
-      const response = await sendMessageWithTimeout(
-        { type: MSG_DEFINE, selectedText: text, pageContext: "", exactMode, verbosity }
-      );
-      if (currentHost !== hostAtRequest) return;
-      if (!response) {
-        if (quietMode) { removePopup(); return; }
-        stateManager?.setDefinitions([], "Definition timed out. Please try again.");
-        return;
-      }
-      if (response.skip) {
-        if (stateManager && stateManager.stackLength > 0) {
-          stateManager.popStack();
-        } else {
-          removePopup();
-        }
-        return;
-      }
-      if (response.error) {
-        if (quietMode && (!response.definitions || response.definitions.length === 0)) {
-          removePopup();
-          return;
-        }
-        stateManager?.setDefinitions(response.definitions || [], quietMode ? undefined : response.error);
-      } else if (response.definitions?.length) {
-        stateManager?.setDefinitions(response.definitions);
-      } else {
-        if (quietMode) { removePopup(); return; }
-        stateManager?.setDefinitions([], "No response received. Try again.");
-      }
-    });
+    void (async () => {
+      const { exactMode, verbosity, quietMode } = await getSettings();
+      const message: DefineMessage = {
+        type: MSG_DEFINE, selectedText: text, pageContext: "", exactMode, verbosity, pageKind: getPageKind(),
+      };
+      const response = await sendMessageWithTimeout(message);
+      applyDefineResponse(response, {
+        hostAtRequest,
+        quietMode,
+        onSkip: () => {
+          if (stateManager && stateManager.stackLength > 0) stateManager.popStack();
+          else removePopup();
+        },
+      });
+    })();
 
+    // Protect this deliberate clear from the deselect-dismissal in selectionchange.
+    lastButtonActionTime = Date.now();
     sel.removeAllRanges();
   });
 }
@@ -247,39 +281,18 @@ function handleSelection(): void {
 
   const pageContext = getPageContext(selection);
 
-  chrome.storage.sync.get(["exactMode", "verbosity", "quietMode"], async (result) => {
-    const exactMode = result.exactMode === true;
-    const verbosity = result.verbosity ?? 3;
-    const quietMode = result.quietMode !== false;
-    const response = await sendMessageWithTimeout(
-      { type: MSG_DEFINE, selectedText, pageContext, exactMode, verbosity }
-    );
-    if (currentHost !== hostAtCreation) return;
-
-    if (!response) {
-      if (quietMode) { removePopup(); return; }
-      stateManager?.setDefinitions([], "Definition timed out. Please try again.");
-      return;
-    }
-
-    if (response.skip) {
-      removePopup();
-      return;
-    }
-
-    if (response.error) {
-      if (quietMode && (!response.definitions || response.definitions.length === 0)) {
-        removePopup();
-        return;
-      }
-      stateManager?.setDefinitions(response.definitions || [], quietMode ? undefined : response.error);
-    } else if (response.definitions?.length) {
-      stateManager?.setDefinitions(response.definitions);
-    } else {
-      if (quietMode) { removePopup(); return; }
-      stateManager?.setDefinitions([], "No response received. Try again.");
-    }
-  });
+  void (async () => {
+    const { exactMode, verbosity, quietMode } = await getSettings();
+    const message: DefineMessage = {
+      type: MSG_DEFINE, selectedText, pageContext, exactMode, verbosity, pageKind: getPageKind(),
+    };
+    const response = await sendMessageWithTimeout(message);
+    applyDefineResponse(response, {
+      hostAtRequest: hostAtCreation,
+      quietMode,
+      onSkip: () => removePopup(),
+    });
+  })();
 }
 
 // Show popup on mouse text selection
@@ -299,9 +312,27 @@ document.addEventListener("touchend", () => {
   handleSelection();
 });
 
+// Dismiss the popup the instant the selection that spawned it is gone.
+function maybeDismissOnDeselect(): void {
+  if (!currentHost) return;
+  // Protect the open moment and any just-happened popup interaction (incl. the
+  // deliberate removeAllRanges() in the nested-definition flow).
+  if (Date.now() - popupOpenedAt < 400) return;
+  if (Date.now() - lastButtonActionTime < 400) return;
+  // User is selecting text inside the popup itself (nested flow) — keep it.
+  const sh = currentHost.shadowRoot;
+  const shadowSel = sh && "getSelection" in sh ? (sh as any).getSelection() as Selection | null : null;
+  if (shadowSel && !shadowSel.isCollapsed && shadowSel.toString().trim()) return;
+  // A real page selection still exists — keep it.
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+  removePopup();
+}
+
 // Show popup on keyboard text selection (Shift+arrow, Ctrl+A, etc.)
 let selectionChangeTimer: ReturnType<typeof setTimeout> | null = null;
 document.addEventListener("selectionchange", () => {
+  maybeDismissOnDeselect();
   if (selectionChangeTimer) clearTimeout(selectionChangeTimer);
   selectionChangeTimer = setTimeout(() => {
     selectionChangeTimer = null;

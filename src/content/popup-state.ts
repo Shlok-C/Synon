@@ -1,4 +1,4 @@
-import type { Definition, PopupState } from "../shared/types";
+import type { Definition, PopupState, PopupSchema } from "../shared/types";
 import type { PopupElements } from "./popup-ui";
 
 export interface PopupStateManager {
@@ -6,6 +6,7 @@ export interface PopupStateManager {
   readonly stackLength: number;
   setLoadingState(word: string): void;
   setDefinitions(definitions: Definition[], error?: string): void;
+  setSchema(schema: PopupSchema): void;
   pushAndLoad(word: string): void;
   popStack(): void;
   navigatePrev(): void;
@@ -109,6 +110,10 @@ export function createPopupStateManager(elements: PopupElements): PopupStateMana
       currentPopupState.definitions = definitions;
       currentPopupState.index = 0;
       renderCurrentState();
+    },
+
+    setSchema(schema: PopupSchema): void {
+      if (currentPopupState) currentPopupState.schema = schema;
     },
 
     pushAndLoad(word: string): void {

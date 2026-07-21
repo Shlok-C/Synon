@@ -1,3 +1,5 @@
+import type { PageKind } from "../shared/types";
+
 export function isEmailPage(): boolean {
   const host = location.hostname;
   return (
@@ -87,4 +89,10 @@ export function getPageContext(selection: Selection): string {
   if (isPDFPage()) return getPDFContext(selection);
   if (isEmailPage()) return getEmailContext(selection);
   return getGenericContext(selection);
+}
+
+export function getPageKind(): PageKind {
+  if (isPDFPage()) return "pdf";
+  if (isEmailPage()) return "email";
+  return "generic";
 }

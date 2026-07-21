@@ -1,7 +1,7 @@
 import { isCommonWord } from "./common-words";
 import { noun, verb, adjective } from "wink-lemmatizer";
 import lexicon from "wink-lexicon/src/wn-words.js";
-import type { Definition, DefineResponse } from "./shared/types";
+import type { Definition, DefineResponse, PopupSchema, PageKind } from "./shared/types";
 import { classify, normalizeSelection } from "./shared/validation";
 import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED } from "./shared/messages";
 
@@ -80,6 +80,17 @@ function truncateByVerbosity(text: string, verbosity: number): string {
 
   const truncated = sentences.slice(0, maxSentences).join("").trim();
   return truncated || text;
+}
+
+// --- Schema helpers ---
+function countSources(defs: Definition[]): { dictionary: number; wikipedia: number; ai: number } {
+  const counts = { dictionary: 0, wikipedia: 0, ai: 0 };
+  for (const d of defs) {
+    if (d.source === "Dictionary") counts.dictionary++;
+    else if (d.source === "Wikipedia") counts.wikipedia++;
+    else if (d.source === "AI") counts.ai++;
+  }
+  return counts;
 }
 
 // --- Fetch with timeout ---
@@ -372,7 +383,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const selectedText = normalizeSelection(info.selectionText.trim());
   if (!selectedText) return;
 
-  const result = await handleDefine(selectedText, "", true);
+  const result = await handleDefine(selectedText, "", true, 3, "generic");
 
   if (tab?.id) {
     try {
@@ -391,13 +402,14 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 // --- Message handling ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === MSG_DEFINE) {
-    const { selectedText, pageContext, exactMode, verbosity } = message as {
+    const { selectedText, pageContext, exactMode, verbosity, pageKind } = message as {
       selectedText: string;
       pageContext: string;
       exactMode?: boolean;
       verbosity?: number;
+      pageKind?: PageKind;
     };
-    handleDefine(selectedText, pageContext, exactMode ?? false, verbosity ?? 3).then(sendResponse);
+    handleDefine(selectedText, pageContext, exactMode ?? false, verbosity ?? 3, pageKind ?? "generic").then(sendResponse);
     return true;
   }
 
@@ -424,16 +436,21 @@ async function handleDefine(
   selectedText: string,
   pageContext: string,
   exactMode: boolean = false,
-  verbosity: number = 3
+  verbosity: number = 3,
+  pageKind: PageKind = "generic"
 ): Promise<DefineResponse> {
   const cacheKey = getCacheKey(selectedText, exactMode, verbosity, pageContext);
   const cached = getCached(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    return cached.schema
+      ? { ...cached, schema: { ...cached.schema, result: { ...cached.schema.result, fromCache: true } } }
+      : cached;
+  }
 
   const existing = inFlightRequests.get(cacheKey);
   if (existing) return existing;
 
-  const promise = handleDefineInner(selectedText, pageContext, exactMode, verbosity, cacheKey);
+  const promise = handleDefineInner(selectedText, pageContext, exactMode, verbosity, pageKind, cacheKey);
   inFlightRequests.set(cacheKey, promise);
   promise.finally(() => inFlightRequests.delete(cacheKey));
   return promise;
@@ -444,6 +461,7 @@ async function handleDefineInner(
   pageContext: string,
   exactMode: boolean,
   verbosity: number,
+  pageKind: PageKind,
   cacheKey: string
 ): Promise<DefineResponse> {
   const type = classify(selectedText);
@@ -451,16 +469,45 @@ async function handleDefineInner(
     return { definitions: [], error: "Please select a valid word or phrase." };
   }
 
-  if (!exactMode) {
-    if (type === "word" && isCommonWord(selectedText)) {
-      return { definitions: [], skip: true };
-    }
-    if (type === "phrase") {
-      const words = selectedText.trim().split(/\s+/);
-      if (words.some((w) => isCommonWord(w))) {
-        return { definitions: [], skip: true };
-      }
-    }
+  // --- Per-highlight schema scaffolding ---
+  const words = selectedText.trim().split(/\s+/);
+  const common = type === "word" ? isCommonWord(selectedText) : words.some((w) => isCommonWord(w));
+  const baseSchema = {
+    phrase: selectedText,
+    selectionType: type,
+    wordCount: words.length,
+    common,
+    inLexicon: type === "word" ? isInLexicon(selectedText) : false,
+    context: { length: pageContext.length, pageKind },
+    settings: { exactMode, verbosity },
+  };
+
+  let usedLemmaFallback = false;
+  let usedAiFallback = false;
+  let reorderedByLLM = false;
+  let chosenIndex = 0;
+
+  const makeSchema = (
+    defs: Definition[],
+    extra: { skipped?: boolean; error?: string | null } = {}
+  ): PopupSchema => ({
+    ...baseSchema,
+    result: {
+      skipped: extra.skipped ?? false,
+      fromCache: false,
+      definitionCount: defs.length,
+      sourceCounts: countSources(defs),
+      usedLemmaFallback,
+      usedAiFallback,
+      reorderedByLLM,
+      chosenIndex,
+      error: extra.error ?? null,
+    },
+  });
+
+  // Exact Mode off: skip common words/phrases (`common` covers both word and phrase cases).
+  if (!exactMode && common) {
+    return { definitions: [], skip: true, schema: makeSchema([], { skipped: true }) };
   }
 
   try {
@@ -470,13 +517,12 @@ async function handleDefineInner(
       if (!lemmas.some(l => isInLexicon(l))) {
         const dictResult = await lookupDictionary(selectedText);
         if (dictResult) {
-          const response: DefineResponse = {
-            definitions: [{ source: "Dictionary", text: dictResult.text, url: dictResult.url }],
-          };
+          const defs: Definition[] = [{ source: "Dictionary", text: dictResult.text, url: dictResult.url }];
+          const response: DefineResponse = { definitions: defs, schema: makeSchema(defs) };
           setCache(cacheKey, response);
           return response;
         }
-        return { definitions: [], skip: true };
+        return { definitions: [], skip: true, schema: makeSchema([], { skipped: true }) };
       }
     }
 
@@ -505,7 +551,7 @@ async function handleDefineInner(
         for (const lw of lemmaWiki) {
           definitions.push({ source: "Wikipedia", text: truncateByVerbosity(lw.text, verbosity), url: lw.url, rootWord: lemma, title: lw.title });
         }
-        if (definitions.length > 0) break;
+        if (definitions.length > 0) { usedLemmaFallback = true; break; }
       }
     }
 
@@ -513,17 +559,16 @@ async function handleDefineInner(
       const aiResult = await lookupAI(selectedText, pageContext);
       if (aiResult) {
         definitions.push({ source: "AI", text: aiResult, url: null });
+        usedAiFallback = true;
       }
     }
 
     if (definitions.length === 0) {
       const hasKey = !!(await getApiKey());
-      return {
-        definitions: [],
-        error: hasKey
-          ? "No definition found."
-          : "No definition found, and no OpenRouter API key set for AI fallback. Click the Synon icon to add one.",
-      };
+      const error = hasKey
+        ? "No definition found."
+        : "No definition found, and no OpenRouter API key set for AI fallback. Click the Synon icon to add one.";
+      return { definitions: [], error, schema: makeSchema([], { error }) };
     }
 
     if (definitions.length >= 2 && pageContext.trim().length >= 50) {
@@ -534,6 +579,7 @@ async function handleDefineInner(
           if (pick !== null && pick > 0) {
             const [chosen] = definitions.splice(pick, 1);
             definitions.unshift(chosen);
+            reorderedByLLM = true;
           }
         } catch {
           // Rate-limit, timeout, or bad key — keep original ordering.
@@ -541,15 +587,16 @@ async function handleDefineInner(
       }
     }
 
-    const response: DefineResponse = { definitions };
+    const response: DefineResponse = { definitions, schema: makeSchema(definitions) };
     setCache(cacheKey, response);
     return response;
   } catch (err: any) {
     const msg = err?.message;
-    if (msg === "TIMEOUT") return { definitions: [], error: "Request timed out. Please try again." };
-    if (msg === "NETWORK") return { definitions: [], error: "Network error. Check your connection." };
-    if (msg === "API_KEY_INVALID") return { definitions: [], error: "API key is invalid or expired. Update it in Synon settings." };
-    return { definitions: [], error: "Something went wrong." };
+    let error = "Something went wrong.";
+    if (msg === "TIMEOUT") error = "Request timed out. Please try again.";
+    else if (msg === "NETWORK") error = "Network error. Check your connection.";
+    else if (msg === "API_KEY_INVALID") error = "API key is invalid or expired. Update it in Synon settings.";
+    return { definitions: [], error, schema: makeSchema([], { error }) };
   }
 }
 
