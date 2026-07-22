@@ -357,6 +357,28 @@ function getViewerUrl(pdfUrl: string): string {
   return `${chrome.runtime.getURL("pdfjs/web/viewer.html")}?file=${encodeURIComponent(pdfUrl)}`;
 }
 
+// --- Open PDF tab registry (survives extension reload; used to restore tabs closed by it) ---
+const OPEN_PDF_TABS_KEY = "openPdfTabs";
+
+function registerPdfTab(tabId: number, pdfUrl: string): void {
+  chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
+    const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
+    tabs[String(tabId)] = pdfUrl;
+    chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: tabs });
+  });
+}
+
+function unregisterPdfTab(tabId: number): void {
+  chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
+    const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
+    if (!(String(tabId) in tabs)) return;
+    delete tabs[String(tabId)];
+    chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: tabs });
+  });
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => unregisterPdfTab(tabId));
+
 // URL-based PDF detection (catches .pdf links before navigation completes)
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0) return;
@@ -365,15 +387,38 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   chrome.storage.sync.get("pdfViewerEnabled", (result) => {
     if (result.pdfViewerEnabled === false) return;
     chrome.tabs.update(details.tabId, { url: getViewerUrl(details.url) });
+    registerPdfTab(details.tabId, details.url);
   });
 });
 
-// --- Context menu ---
-chrome.runtime.onInstalled.addListener(() => {
+// --- Context menu + PDF tab restore ---
+chrome.runtime.onInstalled.addListener((details) => {
   chrome.contextMenus.create({
     id: "synon-define",
     title: 'Define "%s"',
     contexts: ["selection"],
+  });
+
+  if (details.reason !== "update") return;
+
+  chrome.storage.sync.get("pdfReopenOnReload", (settings) => {
+    if (settings.pdfReopenOnReload === false) return;
+
+    chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
+      const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
+      const pdfUrls = Object.values(tabs);
+      if (pdfUrls.length === 0) return;
+
+      // Old tab IDs are stale after a reload — clear before recreating.
+      chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: {} });
+
+      for (const pdfUrl of pdfUrls) {
+        chrome.tabs.create({ url: getViewerUrl(pdfUrl), active: false }, (tab) => {
+          if (chrome.runtime.lastError || !tab?.id) return;
+          registerPdfTab(tab.id, pdfUrl);
+        });
+      }
+    });
   });
 });
 
@@ -420,6 +465,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chrome.storage.sync.get("pdfViewerEnabled", (result) => {
         if (result.pdfViewerEnabled === false) return;
         chrome.tabs.update(tabId, { url: getViewerUrl(message.url) });
+        registerPdfTab(tabId, message.url);
       });
     }
     return false;

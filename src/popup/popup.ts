@@ -7,6 +7,7 @@ const verbositySlider = document.getElementById("verbosity") as HTMLInputElement
 const verbosityLabel = document.getElementById("verbosityLabel") as HTMLSpanElement;
 const quietModeCheckbox = document.getElementById("quietMode") as HTMLInputElement;
 const pdfViewerCheckbox = document.getElementById("pdfViewer") as HTMLInputElement;
+const pdfReopenOnReloadCheckbox = document.getElementById("pdfReopenOnReload") as HTMLInputElement;
 const pdfPerfSection = document.getElementById("pdfPerf") as HTMLDivElement;
 const pdfStreamingCheckbox = document.getElementById("pdfStreaming") as HTMLInputElement;
 const pdfRenderWindowSlider = document.getElementById("pdfRenderWindow") as HTMLInputElement;
@@ -43,7 +44,7 @@ function updateVerbosityLabel(value: string): void {
 
 // Load saved settings on popup open
 chrome.storage.sync.get(
-  ["apiKey", "exactMode", "quietMode", "verbosity", "pdfViewerEnabled", "pdfStreaming", "pdfRenderWindow", "pdfOutlineScanCap"],
+  ["apiKey", "exactMode", "quietMode", "verbosity", "pdfViewerEnabled", "pdfReopenOnReload", "pdfStreaming", "pdfRenderWindow", "pdfOutlineScanCap"],
   (result) => {
     if (result.apiKey) {
       apiKeyInput.value = result.apiKey;
@@ -55,6 +56,7 @@ chrome.storage.sync.get(
     verbositySlider.value = String(v);
     updateVerbosityLabel(String(v));
     pdfViewerCheckbox.checked = result.pdfViewerEnabled !== false; // default true
+    pdfReopenOnReloadCheckbox.checked = result.pdfReopenOnReload !== false; // default true
 
     pdfStreamingCheckbox.checked = result.pdfStreaming !== false; // default true
     const rw = result.pdfRenderWindow ?? PDF_RENDER_WINDOW_DEFAULT;
@@ -79,6 +81,10 @@ quietModeCheckbox.addEventListener("change", () => {
 pdfViewerCheckbox.addEventListener("change", () => {
   chrome.storage.sync.set({ pdfViewerEnabled: pdfViewerCheckbox.checked });
   syncPdfPerfVisibility();
+});
+
+pdfReopenOnReloadCheckbox.addEventListener("change", () => {
+  chrome.storage.sync.set({ pdfReopenOnReload: pdfReopenOnReloadCheckbox.checked });
 });
 
 pdfStreamingCheckbox.addEventListener("change", () => {

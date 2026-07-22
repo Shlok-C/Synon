@@ -198,11 +198,17 @@ document.addEventListener("mousedown", (e: MouseEvent) => {
   removePopup();
 });
 
-// Keyboard control: Escape dismisses; Left/Right cycle through meanings
-document.addEventListener("keydown", (e: KeyboardEvent) => {
-  if (!currentHost) return;
+// Keyboard control: Escape dismisses (superseding the page); Left/Right cycle meanings.
+// Capture-phase on window so the popup consumes the key before the page's own handlers.
+window.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (!currentHost) return; // no popup → let the page handle Escape/arrows normally
 
-  if (e.key === "Escape") { removePopup(); return; }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    removePopup();
+    return;
+  }
 
   // Don't hijack arrows while the user is in a form field / editor.
   const ae = document.activeElement as HTMLElement | null;
@@ -211,9 +217,9 @@ document.addEventListener("keydown", (e: KeyboardEvent) => {
   const state = stateManager?.currentState;
   if (!state || state.definitions.length <= 1) return;
 
-  if (e.key === "ArrowLeft") { e.preventDefault(); stateManager!.navigatePrev(); }
-  else if (e.key === "ArrowRight") { e.preventDefault(); stateManager!.navigateNext(); }
-});
+  if (e.key === "ArrowLeft") { e.preventDefault(); e.stopImmediatePropagation(); stateManager!.navigatePrev(); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); e.stopImmediatePropagation(); stateManager!.navigateNext(); }
+}, true);
 
 // Handle context-menu definitions from background
 chrome.runtime.onMessage.addListener((message) => {
