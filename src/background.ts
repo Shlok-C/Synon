@@ -497,6 +497,7 @@ async function handleDefineInner(
       fromCache: false,
       definitionCount: defs.length,
       sourceCounts: countSources(defs),
+      wikipediaPages: defs.filter((d) => d.source === "Wikipedia").map((d) => d.title ?? "").filter(Boolean),
       usedLemmaFallback,
       usedAiFallback,
       reorderedByLLM,

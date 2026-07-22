@@ -21,6 +21,7 @@ export interface PopupSchema {
     fromCache: boolean;
     definitionCount: number;
     sourceCounts: { dictionary: number; wikipedia: number; ai: number };
+    wikipediaPages: string[];             // titles of all Wikipedia pages returned
     usedLemmaFallback: boolean;
     usedAiFallback: boolean;
     reorderedByLLM: boolean;
