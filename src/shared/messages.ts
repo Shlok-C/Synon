@@ -3,6 +3,7 @@ import type { Definition, PageKind } from "./types";
 export const MSG_DEFINE = "DEFINE" as const;
 export const MSG_SHOW_DEFINITION = "SHOW_DEFINITION" as const;
 export const MSG_PDF_DETECTED = "PDF_DETECTED" as const;
+export const MSG_PDF_VIEWER_OPENED = "PDF_VIEWER_OPENED" as const;
 
 export interface DefineMessage {
   type: typeof MSG_DEFINE;
@@ -22,6 +23,11 @@ export interface ShowDefinitionMessage {
 
 export interface PDFDetectedMessage {
   type: typeof MSG_PDF_DETECTED;
+  url: string;
+}
+
+export interface PDFViewerOpenedMessage {
+  type: typeof MSG_PDF_VIEWER_OPENED;
   url: string;
 }
 

@@ -3,7 +3,7 @@ import { noun, verb, adjective } from "wink-lemmatizer";
 import lexicon from "wink-lexicon/src/wn-words.js";
 import type { Definition, DefineResponse, PopupSchema, PageKind } from "./shared/types";
 import { classify, normalizeSelection } from "./shared/validation";
-import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED } from "./shared/messages";
+import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED, MSG_PDF_VIEWER_OPENED } from "./shared/messages";
 
 // --- Definition cache ---
 interface CacheEntry {
@@ -360,39 +360,83 @@ function getViewerUrl(pdfUrl: string): string {
 // --- Open PDF tab registry (survives extension reload; used to restore tabs closed by it) ---
 const OPEN_PDF_TABS_KEY = "openPdfTabs";
 
+// --- Diagnostic trace (temporary — remove once root cause of the reopen bug is confirmed) ---
+// Writes to storage, not just console.log: the OLD instance's service-worker
+// inspector window closes the moment reload tears it down, so console output
+// there may never be seen. Read the merged timeline back afterwards via:
+//   chrome.storage.local.get("pdfRestoreDebugLog", r => console.log(r.pdfRestoreDebugLog.join("\n")))
+const DEBUG_LOG_KEY = "pdfRestoreDebugLog";
+const DEBUG_LOG_MAX = 50;
+
+function debugTrace(event: string, detail: Record<string, unknown>): void {
+  const line = `[${new Date().toISOString()}] ${event} ${JSON.stringify(detail)}`;
+  console.log("[Synon PDF-restore]", line);
+  chrome.storage.local.get(DEBUG_LOG_KEY, (result) => {
+    const log: string[] = result[DEBUG_LOG_KEY] || [];
+    log.push(line);
+    while (log.length > DEBUG_LOG_MAX) log.shift();
+    chrome.storage.local.set({ [DEBUG_LOG_KEY]: log });
+  });
+}
+
 function registerPdfTab(tabId: number, pdfUrl: string): void {
   chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
     const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
     tabs[String(tabId)] = pdfUrl;
-    chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: tabs });
+    chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: tabs }, () => {
+      debugTrace("registerPdfTab", { tabId, pdfUrl, registryAfter: tabs });
+    });
   });
 }
 
 function unregisterPdfTab(tabId: number): void {
   chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
     const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
-    if (!(String(tabId) in tabs)) return;
+    // Logged before the early-return/delete so this fires even if the JS
+    // context dies moments later — proves the listener at least started.
+    debugTrace("unregisterPdfTab:start", { tabId, registryBefore: tabs });
+    if (!(String(tabId) in tabs)) {
+      debugTrace("unregisterPdfTab:noop", { tabId });
+      return;
+    }
     delete tabs[String(tabId)];
-    chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: tabs });
+    chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: tabs }, () => {
+      debugTrace("unregisterPdfTab:pruned", { tabId, registryAfter: tabs });
+    });
   });
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => unregisterPdfTab(tabId));
+// Deferred, not synchronous: if this tab is closing because the OLD extension
+// instance's origin is being torn down for a reload, that instance's JS
+// context is killed at/around the same moment — a pending setTimeout in it
+// never fires, so this registry entry survives untouched for the NEW
+// instance's restore read moments later. If the tab closed during ordinary
+// operation, the prune still happens ~5s later (imperceptible; the registry
+// is only ever consulted at the next reload).
+const PDF_UNREGISTER_DELAY_MS = 5000;
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  debugTrace("tabs.onRemoved", { tabId, scheduledDelayMs: PDF_UNREGISTER_DELAY_MS });
+  setTimeout(() => unregisterPdfTab(tabId), PDF_UNREGISTER_DELAY_MS);
+});
 
 // URL-based PDF detection (catches .pdf links before navigation completes)
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   if (details.frameId !== 0) return;
   if (!isPdfUrl(details.url)) return;
   if (details.url.startsWith(chrome.runtime.getURL(""))) return;
+  debugTrace("onBeforeNavigate:pdfMatch", { tabId: details.tabId, url: details.url });
   chrome.storage.sync.get("pdfViewerEnabled", (result) => {
+    debugTrace("onBeforeNavigate:settingRead", { pdfViewerEnabled: result.pdfViewerEnabled });
     if (result.pdfViewerEnabled === false) return;
     chrome.tabs.update(details.tabId, { url: getViewerUrl(details.url) });
-    registerPdfTab(details.tabId, details.url);
   });
 });
 
 // --- Context menu + PDF tab restore ---
 chrome.runtime.onInstalled.addListener((details) => {
+  debugTrace("onInstalled", { reason: details.reason });
+
   chrome.contextMenus.create({
     id: "synon-define",
     title: 'Define "%s"',
@@ -402,20 +446,39 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason !== "update") return;
 
   chrome.storage.sync.get("pdfReopenOnReload", (settings) => {
+    debugTrace("onInstalled:settingRead", { pdfReopenOnReload: settings.pdfReopenOnReload });
     if (settings.pdfReopenOnReload === false) return;
 
     chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
       const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
       const pdfUrls = Object.values(tabs);
-      if (pdfUrls.length === 0) return;
+      // Multiple tabIds can legitimately map to the same URL (the same PDF
+      // open in two tabs, or a close+reopen racing the delayed unregister) —
+      // restore at most one tab per unique PDF.
+      const uniquePdfUrls = Array.from(new Set(pdfUrls));
+      debugTrace("onInstalled:registryRead", { registry: tabs, pdfUrls, uniquePdfUrls });
+      if (uniquePdfUrls.length === 0) return;
 
       // Old tab IDs are stale after a reload — clear before recreating.
       chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: {} });
 
-      for (const pdfUrl of pdfUrls) {
+      for (const pdfUrl of uniquePdfUrls) {
         chrome.tabs.create({ url: getViewerUrl(pdfUrl), active: false }, (tab) => {
-          if (chrome.runtime.lastError || !tab?.id) return;
-          registerPdfTab(tab.id, pdfUrl);
+          if (chrome.runtime.lastError) {
+            debugTrace("onInstalled:tabsCreateError", {
+              pdfUrl,
+              lastError: chrome.runtime.lastError.message,
+            });
+            return;
+          }
+          if (!tab?.id) {
+            debugTrace("onInstalled:tabsCreateNoId", { pdfUrl });
+            return;
+          }
+          // Registration is left to the new tab's own viewer.js self-report
+          // (MSG_PDF_VIEWER_OPENED) — same single-source-of-truth pattern as
+          // onBeforeNavigate and MSG_PDF_DETECTED.
+          debugTrace("onInstalled:tabsCreateSuccess", { pdfUrl, newTabId: tab.id });
         });
       }
     });
@@ -461,12 +524,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Embed-based PDF detection (catches PDFs served without .pdf extension)
   if (message.type === MSG_PDF_DETECTED) {
     const tabId = sender.tab?.id;
+    debugTrace("MSG_PDF_DETECTED", { tabId, url: message.url });
     if (tabId != null) {
       chrome.storage.sync.get("pdfViewerEnabled", (result) => {
+        debugTrace("MSG_PDF_DETECTED:settingRead", { pdfViewerEnabled: result.pdfViewerEnabled });
         if (result.pdfViewerEnabled === false) return;
         chrome.tabs.update(tabId, { url: getViewerUrl(message.url) });
-        registerPdfTab(tabId, message.url);
       });
+    }
+    return false;
+  }
+
+  // Self-reported by the viewer page on every load — fresh redirect, Chrome's
+  // own tab/session restore, or a manually pasted viewer URL all land here.
+  if (message.type === MSG_PDF_VIEWER_OPENED) {
+    const tabId = sender.tab?.id;
+    debugTrace("MSG_PDF_VIEWER_OPENED", { tabId, url: message.url });
+    if (tabId != null) {
+      registerPdfTab(tabId, message.url);
     }
     return false;
   }

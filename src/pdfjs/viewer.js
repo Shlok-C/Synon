@@ -34,6 +34,11 @@
     return;
   }
 
+  // Self-report on every load — not just fresh redirects — so tabs restored
+  // directly to this viewer.html URL (Chrome's "Reopen closed tab", session
+  // restore) are tracked for reload-recovery just like freshly-redirected ones.
+  chrome.runtime.sendMessage({ type: "PDF_VIEWER_OPENED", url: pdfUrl });
+
   // --- PDF.js ---
   const pdfjsLib = await import("../build/pdf.mjs");
   pdfjsLib.GlobalWorkerOptions.workerSrc = "../build/pdf.worker.mjs";
