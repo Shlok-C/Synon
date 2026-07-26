@@ -1,6 +1,6 @@
 import type { Definition, DefineResponse } from "../shared/types";
-import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED, type DefineMessage } from "../shared/messages";
-import { getPageContext, getPageKind } from "./context";
+import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED, MSG_GET_ARTICLE_SNAPSHOT, type DefineMessage } from "../shared/messages";
+import { getPageContext, getPageKind, extractArticleSnapshot } from "./context";
 import { createPositionTracker } from "./positioning";
 import { isPartialWordSelection, isValidSelection, isEditableContext } from "./selection";
 import { normalizeSelection } from "../shared/validation";
@@ -344,6 +344,13 @@ document.addEventListener("selectionchange", () => {
     selectionChangeTimer = null;
     handleSelection();
   }, 300);
+});
+
+// Respond with the current page's article snapshot (title, favicon, best-effort text)
+// for the Library "Add to Library" flow.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type !== MSG_GET_ARTICLE_SNAPSHOT) return;
+  sendResponse(extractArticleSnapshot());
 });
 
 // --- PDF embed detection ---

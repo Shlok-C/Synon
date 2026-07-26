@@ -1,9 +1,11 @@
 import { isCommonWord } from "./common-words";
 import { noun, verb, adjective } from "wink-lemmatizer";
 import lexicon from "wink-lexicon/src/wn-words.js";
-import type { Definition, DefineResponse, PopupSchema, PageKind } from "./shared/types";
+import type { Definition, DefineResponse, PopupSchema, PageKind, OutlineCandidate, OutlineNode } from "./shared/types";
 import { classify, normalizeSelection } from "./shared/validation";
-import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED, MSG_PDF_VIEWER_OPENED } from "./shared/messages";
+import { MSG_DEFINE, MSG_SHOW_DEFINITION, MSG_PDF_DETECTED, MSG_PDF_VIEWER_OPENED, MSG_GET_ARTICLE_SNAPSHOT, MSG_GENERATE_PDF_OUTLINE } from "./shared/messages";
+import { addItem } from "./shared/library-db";
+import type { ArticleSnapshotResponse, GeneratePdfOutlineResponse } from "./shared/messages";
 
 // --- Definition cache ---
 interface CacheEntry {
@@ -265,7 +267,7 @@ async function lookupWikipedia(text: string): Promise<{ title: string; text: str
   }
 }
 
-const OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
+const OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free";
 
 async function callOpenRouter(
   apiKey: string,
@@ -284,6 +286,7 @@ async function callOpenRouter(
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
         max_tokens: maxTokens,
+        reasoning: { enabled: false },
         messages: [{ role: "user", content: userContent }],
       }),
     }, 15000);
@@ -347,6 +350,48 @@ ${numbered}`;
   return n - 1;
 }
 
+function buildOutlinePrompt(candidates: OutlineCandidate[]): string {
+  const lines = candidates
+    .map((c, i) => {
+      const hints = [c.isBold && "B", c.isLarge && "L", c.isNumbered && "N"].filter(Boolean).join(",");
+      return `${i + 1}. [p${c.pageIndex}${hints ? ", " + hints : ""}] ${c.text}`;
+    })
+    .join("\n");
+
+  return `You are analyzing text lines extracted from a PDF to find its section/chapter headings. Below is a numbered list of candidate lines with their 0-indexed page number and formatting hints (B=bold, L=large font, N=looks numbered).
+
+${lines}
+
+Identify which numbered lines are genuine section or chapter headings (ignore body text, captions, page numbers, and running headers). Respond with ONLY a JSON array of objects like [{"index":1,"level":0},{"index":5,"level":1}] where "index" matches the numbers above and "level" is 0 for top-level headings, 1 for subheadings, 2 for deeper nesting. If none of the lines are real headings, respond with exactly: []`;
+}
+
+async function generatePdfOutline(candidates: OutlineCandidate[]): Promise<GeneratePdfOutlineResponse> {
+  try {
+    if (candidates.length === 0) return { nodes: [] };
+
+    const apiKey = await getApiKey();
+    if (!apiKey) return { nodes: null };
+
+    const reply = await callOpenRouter(apiKey, buildOutlinePrompt(candidates), 1500);
+    if (!reply) return { nodes: null };
+
+    const cleaned = reply.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+    const picks = JSON.parse(cleaned) as { index: number; level: number }[];
+    if (!Array.isArray(picks)) return { nodes: null };
+
+    const nodes: OutlineNode[] = [];
+    for (const pick of picks) {
+      const candidate = candidates[pick.index - 1];
+      if (!candidate) continue;
+      const level = Number.isFinite(pick.level) ? Math.max(0, Math.min(3, Math.trunc(pick.level))) : 0;
+      nodes.push({ title: candidate.text, pageIndex: candidate.pageIndex, level, children: [] });
+    }
+    return { nodes };
+  } catch {
+    return { nodes: null };
+  }
+}
+
 // --- PDF detection helpers ---
 function isPdfUrl(url: string): boolean {
   try { return new URL(url).pathname.toLowerCase().endsWith(".pdf"); }
@@ -355,6 +400,56 @@ function isPdfUrl(url: string): boolean {
 
 function getViewerUrl(pdfUrl: string): string {
   return `${chrome.runtime.getURL("pdfjs/web/viewer.html")}?file=${encodeURIComponent(pdfUrl)}`;
+}
+
+// --- Library ---
+function getOriginalPdfUrlFromViewerTab(url: string): string | null {
+  const viewerBase = chrome.runtime.getURL("pdfjs/web/viewer.html");
+  if (!url.startsWith(viewerBase)) return null;
+  try {
+    return new URL(url).searchParams.get("file");
+  } catch {
+    return null;
+  }
+}
+
+async function getArticleSnapshot(tabId: number): Promise<ArticleSnapshotResponse | null> {
+  try {
+    return await chrome.tabs.sendMessage(tabId, { type: MSG_GET_ARTICLE_SNAPSHOT });
+  } catch {
+    return null;
+  }
+}
+
+async function addPageToLibrary(tab: chrome.tabs.Tab | undefined): Promise<void> {
+  if (!tab?.id || !tab.url) return;
+
+  const originalPdfUrl = getOriginalPdfUrlFromViewerTab(tab.url);
+  if (originalPdfUrl) {
+    await addItem({
+      type: "pdf",
+      sourceKind: "public",
+      url: originalPdfUrl,
+      title: tab.title || originalPdfUrl,
+      faviconUrl: tab.favIconUrl ?? null,
+      snapshotText: null,
+      pdfBytes: null,
+      folderId: null,
+    });
+    return;
+  }
+
+  const snapshot = await getArticleSnapshot(tab.id);
+  await addItem({
+    type: "article",
+    sourceKind: "public",
+    url: tab.url,
+    title: snapshot?.title || tab.title || tab.url,
+    faviconUrl: snapshot?.faviconUrl ?? tab.favIconUrl ?? null,
+    snapshotText: snapshot?.text ?? null,
+    pdfBytes: null,
+    folderId: null,
+  });
 }
 
 // --- Open PDF tab registry (survives extension reload; used to restore tabs closed by it) ---
@@ -443,6 +538,12 @@ chrome.runtime.onInstalled.addListener((details) => {
     contexts: ["selection"],
   });
 
+  chrome.contextMenus.create({
+    id: "synon-add-library",
+    title: "Add page to Library",
+    contexts: ["page", "selection"],
+  });
+
   if (details.reason !== "update") return;
 
   chrome.storage.sync.get("pdfReopenOnReload", (settings) => {
@@ -486,6 +587,11 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === "synon-add-library") {
+    await addPageToLibrary(tab);
+    return;
+  }
+
   if (info.menuItemId !== "synon-define" || !info.selectionText) return;
 
   const selectedText = normalizeSelection(info.selectionText.trim());
@@ -544,6 +650,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       registerPdfTab(tabId, message.url);
     }
     return false;
+  }
+
+  if (message.type === MSG_GENERATE_PDF_OUTLINE) {
+    const { candidates } = message as { candidates: OutlineCandidate[] };
+    generatePdfOutline(candidates).then(sendResponse);
+    return true;
   }
 
   return false;
@@ -723,6 +835,7 @@ async function handleDefineInner(
 }
 
 async function getApiKey(): Promise<string | null> {
+  if (__OPENROUTERS_API_KEY__) return __OPENROUTERS_API_KEY__;
   return new Promise((resolve) => {
     chrome.storage.sync.get("apiKey", (result) => {
       resolve(result.apiKey ?? null);

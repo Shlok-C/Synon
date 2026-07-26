@@ -45,3 +45,41 @@ export interface DefineResponse {
   skip?: boolean;
   schema?: PopupSchema;
 }
+
+export type LibraryItemType = "article" | "pdf";
+export type LibrarySourceKind = "public" | "local";
+
+export interface LibraryFolder {
+  id: string;
+  name: string;
+  createdAt: number;
+  order: number;
+}
+
+export interface LibraryItem {
+  id: string;
+  type: LibraryItemType;
+  sourceKind: LibrarySourceKind;
+  title: string;
+  url: string | null; // live URL for public articles/PDFs; null for local uploads
+  faviconUrl: string | null;
+  snapshotText: string | null; // best-effort article text, articles only
+  pdfBytes: Blob | null; // local PDFs only
+  folderId: string | null; // null = Unfiled
+  dateAdded: number;
+}
+
+export interface OutlineCandidate {
+  text: string;
+  pageIndex: number;
+  isBold: boolean;
+  isLarge: boolean;
+  isNumbered: boolean;
+}
+
+export interface OutlineNode {
+  title: string;
+  pageIndex: number | null;
+  level: number;
+  children: OutlineNode[];
+}

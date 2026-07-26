@@ -96,3 +96,16 @@ export function getPageKind(): PageKind {
   if (isEmailPage()) return "email";
   return "generic";
 }
+
+const SNAPSHOT_MAX_LEN = 20000;
+
+export function extractArticleSnapshot(): { title: string; faviconUrl: string | null; text: string } {
+  const semantic = document.querySelector("article, main, [role='main']");
+  const text = (semantic?.textContent?.trim() || document.body.innerText || "").slice(0, SNAPSHOT_MAX_LEN);
+
+  const iconLink = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
+  const href = iconLink?.getAttribute("href");
+  const faviconUrl = href ? new URL(href, location.href).href : null;
+
+  return { title: document.title, faviconUrl, text };
+}

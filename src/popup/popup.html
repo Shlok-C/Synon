@@ -5,9 +5,156 @@
   <title>Synon</title>
   <style>
     body {
-      width: 300px;
+      width: 340px;
       padding: 16px;
       font-family: system-ui, sans-serif;
+    }
+    .tab-switcher {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid #e8e8e8;
+    }
+    .tab-btn {
+      flex: 1;
+      margin-top: 0;
+      padding: 6px 8px;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      font-size: 13px;
+      font-weight: 500;
+      color: #888;
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      color: #111;
+      border-bottom-color: #111;
+    }
+    #settingsTab[hidden], #libraryTab[hidden] { display: none; }
+    .lib-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .lib-actions button {
+      flex: 1;
+      margin-top: 0;
+      font-size: 12px;
+      padding: 6px 4px;
+    }
+    .lib-tree-actions {
+      margin-top: 12px;
+    }
+    .lib-tree-actions button, #newFolderRow button {
+      margin-top: 0;
+      font-size: 12px;
+      padding: 5px 8px;
+    }
+    #newFolderRow {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    #newFolderRow input {
+      flex: 1;
+      padding: 5px;
+    }
+    #libraryTree {
+      margin-top: 12px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .folder-node {
+      border: 1px solid #eee;
+      border-radius: 4px;
+      margin-bottom: 6px;
+    }
+    .folder-node summary {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      list-style: none;
+    }
+    .folder-node summary::-webkit-details-marker { display: none; }
+    .folder-node summary::before {
+      content: "▸";
+      color: #888;
+      font-size: 11px;
+      transition: transform 0.15s ease;
+    }
+    .folder-node[open] > summary::before {
+      transform: rotate(90deg);
+    }
+    .folder-node-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .folder-node-count {
+      font-size: 11px;
+      color: #888;
+      flex-shrink: 0;
+    }
+    .folder-node-actions {
+      display: flex;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+    .folder-node-actions button {
+      margin-top: 0;
+      padding: 2px 6px;
+      font-size: 11px;
+      line-height: 1;
+    }
+    .folder-node-body {
+      padding: 0 8px 8px;
+    }
+    .folder-node-empty {
+      font-size: 12px;
+      color: #888;
+      padding: 6px 0;
+    }
+    .lib-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 0;
+      border-bottom: 1px solid #eee;
+      font-size: 13px;
+    }
+    .lib-item-badge {
+      font-size: 10px;
+      padding: 2px 5px;
+      border-radius: 3px;
+      background: #eee;
+      color: #666;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    .lib-item-title {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .lib-item select, .lib-item button {
+      margin-top: 0;
+      font-size: 11px;
+      padding: 3px 5px;
+      flex-shrink: 0;
+    }
+    .lib-empty {
+      font-size: 13px;
+      color: #888;
+      padding: 16px 0;
+      text-align: center;
     }
     h1 {
       font-size: 18px;
@@ -80,90 +227,166 @@
       color: #888;
       margin-top: 4px;
     }
-    .section-title {
-      font-size: 12px;
+    .settings-group {
+      margin-top: 12px;
+      border: 1px solid #e8e8e8;
+      border-radius: 6px;
+      padding: 0 10px;
+    }
+    .settings-group summary {
+      cursor: pointer;
+      padding: 10px 0;
+      font-size: 13px;
       font-weight: 600;
-      color: #666;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      margin-top: 16px;
-      padding-top: 12px;
-      border-top: 1px solid #e8e8e8;
+      color: #333;
+      list-style: none;
+    }
+    .settings-group summary::-webkit-details-marker { display: none; }
+    .settings-group summary::before {
+      content: "▸";
+      display: inline-block;
+      margin-right: 6px;
+      color: #888;
+      transition: transform 0.15s ease;
+    }
+    .settings-group[open] > summary::before {
+      transform: rotate(90deg);
+    }
+    .settings-group .group-body {
+      padding-bottom: 12px;
+    }
+    .settings-group.nested {
+      margin-top: 12px;
+      margin-bottom: 4px;
+      border-color: #e0e0e0;
+      background: #fafafa;
+    }
+    .group-body > .toggle-row:first-child {
+      border-top: none;
+      margin-top: 0;
+      padding-top: 0;
     }
     #pdfPerf[hidden] { display: none; }
   </style>
 </head>
 <body>
+  <div class="tab-switcher">
+    <button id="tabSettingsBtn" class="tab-btn active">Settings</button>
+    <button id="tabLibraryBtn" class="tab-btn">Library</button>
+  </div>
+
+  <div id="settingsTab">
   <h1>Synon Settings</h1>
-  <label for="apiKey">OpenRouter API Key</label>
-  <input type="password" id="apiKey" placeholder="sk-or-..." />
-  <button id="save">Save</button>
-  <button id="test">Test</button>
-  <div id="status"></div>
-  <div class="toggle-row">
-    <label for="exactMode">
-      <input type="checkbox" id="exactMode" />
-      Exact Mode
-    </label>
-  </div>
-  <div id="exactModeDesc">When off, common words are silently skipped.</div>
-  <div class="toggle-row">
-    <label for="quietMode">
-      <input type="checkbox" id="quietMode" />
-      Quiet Mode
-    </label>
-  </div>
-  <div id="quietModeDesc" style="font-size:12px;color:#888;margin-top:4px;">When on, failed lookups silently dismiss the popup.</div>
-  <div class="toggle-row">
-    <label for="verbosity">Wikipedia Verbosity</label>
-  </div>
-  <div class="slider-row">
-    <input type="range" id="verbosity" min="1" max="5" value="3" />
-    <span id="verbosityLabel">Standard</span>
-  </div>
-  <div class="toggle-row">
-    <label for="pdfViewer">
-      <input type="checkbox" id="pdfViewer" />
-      PDF Viewer
-    </label>
-  </div>
-  <div id="pdfViewerDesc" style="font-size:12px;color:#888;margin-top:4px;">When on, PDFs open in Synon's viewer with text selection support.</div>
-  <div class="toggle-row">
-    <label for="pdfReopenOnReload">
-      <input type="checkbox" id="pdfReopenOnReload" />
-      Reopen PDFs after extension reload
-    </label>
-  </div>
-  <div id="pdfReopenOnReloadDesc" style="font-size:12px;color:#888;margin-top:4px;">When on, PDF tabs closed by reloading Synon reopen automatically.</div>
 
-  <div id="pdfPerf">
-    <div class="section-title">PDF Performance</div>
+  <details id="grpApi" class="settings-group">
+    <summary>AI / API Key</summary>
+    <div class="group-body">
+      <label for="apiKey">OpenRouter API Key</label>
+      <input type="password" id="apiKey" placeholder="sk-or-..." />
+      <button id="save">Save</button>
+      <button id="test">Test</button>
+      <div id="status"></div>
+    </div>
+  </details>
 
-    <div class="toggle-row">
-      <label for="pdfStreaming">
-        <input type="checkbox" id="pdfStreaming" />
-        Stream large PDFs
-      </label>
+  <details id="grpDefinitions" class="settings-group">
+    <summary>Definition Behavior</summary>
+    <div class="group-body">
+      <div class="toggle-row">
+        <label for="exactMode">
+          <input type="checkbox" id="exactMode" />
+          Exact Mode
+        </label>
+      </div>
+      <div id="exactModeDesc">When off, common words are silently skipped.</div>
+      <div class="toggle-row">
+        <label for="quietMode">
+          <input type="checkbox" id="quietMode" />
+          Quiet Mode
+        </label>
+      </div>
+      <div id="quietModeDesc" style="font-size:12px;color:#888;margin-top:4px;">When on, failed lookups silently dismiss the popup.</div>
+      <div class="toggle-row">
+        <label for="verbosity">Wikipedia Verbosity</label>
+      </div>
+      <div class="slider-row">
+        <input type="range" id="verbosity" min="1" max="5" value="3" />
+        <span id="verbosityLabel">Standard</span>
+      </div>
     </div>
-    <div class="hint">When on, only viewed pages are fetched first — faster to open big files.</div>
+  </details>
 
-    <div class="toggle-row">
-      <label for="pdfRenderWindow">Pages kept in memory</label>
-    </div>
-    <div class="slider-row">
-      <input type="range" id="pdfRenderWindow" min="2" max="20" step="1" value="6" />
-      <span class="slider-val" id="pdfRenderWindowLabel">6 each side</span>
-    </div>
-    <div class="hint">Lower uses less memory on large PDFs; higher re-renders less while scrolling.</div>
+  <details id="grpPdf" class="settings-group">
+    <summary>PDF Viewer</summary>
+    <div class="group-body">
+      <div class="toggle-row">
+        <label for="pdfViewer">
+          <input type="checkbox" id="pdfViewer" />
+          PDF Viewer
+        </label>
+      </div>
+      <div id="pdfViewerDesc" style="font-size:12px;color:#888;margin-top:4px;">When on, PDFs open in Synon's viewer with text selection support.</div>
+      <div class="toggle-row">
+        <label for="pdfReopenOnReload">
+          <input type="checkbox" id="pdfReopenOnReload" />
+          Reopen PDFs after extension reload
+        </label>
+      </div>
+      <div id="pdfReopenOnReloadDesc" style="font-size:12px;color:#888;margin-top:4px;">When on, PDF tabs closed by reloading Synon reopen automatically.</div>
 
-    <div class="toggle-row">
-      <label for="pdfOutlineCap">Auto-build outline under</label>
+      <details id="pdfPerf" class="settings-group nested">
+        <summary>PDF Performance</summary>
+        <div class="group-body">
+          <div class="toggle-row">
+            <label for="pdfStreaming">
+              <input type="checkbox" id="pdfStreaming" />
+              Stream large PDFs
+            </label>
+          </div>
+          <div class="hint">When on, only viewed pages are fetched first — faster to open big files.</div>
+
+          <div class="toggle-row">
+            <label for="pdfRenderWindow">Pages kept in memory</label>
+          </div>
+          <div class="slider-row">
+            <input type="range" id="pdfRenderWindow" min="2" max="20" step="1" value="6" />
+            <span class="slider-val" id="pdfRenderWindowLabel">6 each side</span>
+          </div>
+          <div class="hint">Lower uses less memory on large PDFs; higher re-renders less while scrolling.</div>
+
+          <div class="toggle-row">
+            <label for="pdfOutlineCap">Auto-build outline under</label>
+          </div>
+          <div class="slider-row">
+            <input type="range" id="pdfOutlineCap" min="50" max="1000" step="50" value="250" />
+            <span class="slider-val" id="pdfOutlineCapLabel">250 pages</span>
+          </div>
+          <div class="hint">Above this page count, the outline is built on demand instead of automatically.</div>
+        </div>
+      </details>
     </div>
-    <div class="slider-row">
-      <input type="range" id="pdfOutlineCap" min="50" max="1000" step="50" value="250" />
-      <span class="slider-val" id="pdfOutlineCapLabel">250 pages</span>
+  </details>
+  </div>
+
+  <div id="libraryTab" hidden>
+    <h1>Library</h1>
+    <div class="lib-actions">
+      <button id="addCurrentPageBtn">Add current page</button>
+      <button id="uploadPdfBtn">Upload PDF</button>
+      <input type="file" id="uploadPdfInput" accept="application/pdf" hidden />
     </div>
-    <div class="hint">Above this page count, the outline is built on demand instead of automatically.</div>
+    <div id="libStatus"></div>
+
+    <div class="lib-tree-actions">
+      <button id="newFolderBtn">+ Folder</button>
+    </div>
+    <div id="newFolderRow" hidden>
+      <input type="text" id="newFolderName" placeholder="Folder name" />
+      <button id="createFolderBtn">Create</button>
+      <button id="cancelFolderBtn">Cancel</button>
+    </div>
+
+    <div id="libraryTree"></div>
   </div>
 
   <script src="popup.js"></script>

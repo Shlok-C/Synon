@@ -1,5 +1,5 @@
 import * as esbuild from "esbuild";
-import { cpSync, mkdirSync, existsSync } from "fs";
+import { cpSync, mkdirSync, existsSync, readFileSync } from "fs";
 
 const watch = process.argv.includes("--watch");
 
@@ -9,6 +9,22 @@ const entryPoints = [
   { in: "src/popup/popup.ts", out: "popup/popup" },
 ];
 
+// Minimal .env parser — no dotenv dependency needed for one key.
+function loadEnv(path) {
+  const env = {};
+  if (!existsSync(path)) return env;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+  }
+  return env;
+}
+
+const env = loadEnv(".env");
+
 const buildOptions = {
   entryPoints,
   bundle: true,
@@ -16,6 +32,9 @@ const buildOptions = {
   format: "iife",
   target: "es2020",
   logLevel: "info",
+  define: {
+    __OPENROUTERS_API_KEY__: JSON.stringify(env.OPENROUTERS_KEY || ""),
+  },
 };
 
 // Copy static files to dist

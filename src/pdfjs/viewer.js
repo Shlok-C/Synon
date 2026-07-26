@@ -1,6 +1,160 @@
+// --- Library (IndexedDB) — minimal inline reader/writer for the "Add to
+// Library" toolbar button and locally-uploaded PDFs. Mirrors
+// src/shared/library-db.ts's schema; kept as a small standalone copy since
+// this file is plain JS copied verbatim by build.mjs, not bundled through
+// the TS entry points.
+function openLibraryDb() {
+  return new Promise((resolve, reject) => {
+    // Version must stay in lockstep with src/shared/library-db.ts's DB_VERSION —
+    // IndexedDB versioning is global per database name, not per caller, so a
+    // mismatch throws a VersionError in whichever context opens second.
+    const req = indexedDB.open("synon-library", 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("items")) {
+        const items = db.createObjectStore("items", { keyPath: "id" });
+        items.createIndex("folderId", "folderId");
+      }
+      if (!db.objectStoreNames.contains("folders")) {
+        db.createObjectStore("folders", { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains("outlineCache")) {
+        db.createObjectStore("outlineCache", { keyPath: "pdfKey" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function loadLibraryItem(id) {
+  try {
+    const db = await openLibraryDb();
+    if (!db.objectStoreNames.contains("items")) return null;
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction("items", "readonly").objectStore("items").get(id);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function findLibraryItemByUrl(url) {
+  try {
+    const db = await openLibraryDb();
+    if (!db.objectStoreNames.contains("items")) return null;
+    const all = await new Promise((resolve, reject) => {
+      const req = db.transaction("items", "readonly").objectStore("items").getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+    return all.find((i) => i.type === "pdf" && i.sourceKind === "public" && i.url === url) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function addLibraryItem(item) {
+  try {
+    const db = await openLibraryDb();
+    const full = Object.assign({}, item, { id: crypto.randomUUID(), dateAdded: Date.now() });
+    await new Promise((resolve, reject) => {
+      const req = db.transaction("items", "readwrite").objectStore("items").add(full);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// --- Persistent LLM-outline cache — keyed the same way as the session-scoped
+// heuristic schema cache (libraryId||pdfUrl), but lives in IndexedDB so a
+// previously-opened PDF never re-triggers the LLM, even in a new session.
+async function getCachedOutline(pdfKey) {
+  try {
+    const db = await openLibraryDb();
+    if (!db.objectStoreNames.contains("outlineCache")) return undefined;
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction("outlineCache", "readonly").objectStore("outlineCache").get(pdfKey);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function setCachedOutline(pdfKey, nodes) {
+  try {
+    const db = await openLibraryDb();
+    const record = { pdfKey, nodes, cachedAt: Date.now() };
+    await new Promise((resolve, reject) => {
+      const req = db.transaction("outlineCache", "readwrite").objectStore("outlineCache").put(record);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    // Cache failures (quota, private mode) shouldn't block showing the result.
+  }
+}
+
+// Same noise filter inferOutlineFromSchema applies internally, plus a
+// short-line cap (headings are short; this excludes body paragraphs) and a
+// total-character budget to bound the LLM prompt's size/cost.
+const OUTLINE_CANDIDATE_MAX_LINE_LEN = 120;
+const OUTLINE_CANDIDATE_MAX_CHARS = 6000;
+
+function buildOutlineCandidates(schema) {
+  const candidates = [];
+  let totalChars = 0;
+  for (const r of schema.runs) {
+    if (r.isMargin || r.isTocPage || r.isRunningHeader) continue;
+    const text = r.text.trim();
+    if (!text || text.length > OUTLINE_CANDIDATE_MAX_LINE_LEN) continue;
+    if (totalChars + text.length > OUTLINE_CANDIDATE_MAX_CHARS) break;
+    totalChars += text.length;
+    candidates.push({
+      text,
+      pageIndex: r.pageIndex,
+      isBold: !!r.isBold,
+      isLarge: !!r.isLarge,
+      isNumbered: !!r.isNumbered,
+    });
+  }
+  return candidates;
+}
+
+function requestLlmOutline(candidates, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs);
+    chrome.runtime.sendMessage({ type: "GENERATE_PDF_OUTLINE", candidates }, (response) => {
+      clearTimeout(timer);
+      if (chrome.runtime.lastError || !response) {
+        resolve(null);
+      } else {
+        resolve(response.nodes);
+      }
+    });
+  });
+}
+
 (async function () {
   const params = new URLSearchParams(location.search);
-  const pdfUrl = params.get("file");
+  let pdfUrl = params.get("file");
+  const libraryId = params.get("libraryId");
+  let libraryFilename = null;
+
+  if (!pdfUrl && libraryId) {
+    const item = await loadLibraryItem(libraryId);
+    if (item && item.pdfBytes) {
+      pdfUrl = URL.createObjectURL(item.pdfBytes);
+      libraryFilename = item.title;
+    }
+  }
 
   // --- DOM references ---
   const loadingEl = document.getElementById("loading");
@@ -26,6 +180,7 @@
   const rotateBtn = document.getElementById("rotate-btn");
   const downloadBtn = document.getElementById("download-btn");
   const printBtn = document.getElementById("print-btn");
+  const addLibraryBtn = document.getElementById("add-library-btn");
 
   if (!pdfUrl) {
     loadingEl.style.display = "none";
@@ -37,7 +192,43 @@
   // Self-report on every load — not just fresh redirects — so tabs restored
   // directly to this viewer.html URL (Chrome's "Reopen closed tab", session
   // restore) are tracked for reload-recovery just like freshly-redirected ones.
-  chrome.runtime.sendMessage({ type: "PDF_VIEWER_OPENED", url: pdfUrl });
+  // Skipped for local library items: their pdfUrl is a blob: URL scoped to this
+  // viewer instance, which would be dead by the time a restore tried to reuse it.
+  if (!libraryId) {
+    chrome.runtime.sendMessage({ type: "PDF_VIEWER_OPENED", url: pdfUrl });
+  }
+
+  // --- Add to Library button ---
+  function setLibraryButtonSaved(saved) {
+    addLibraryBtn.classList.toggle("active", saved);
+    addLibraryBtn.title = saved ? "Already in Library" : "Add to Library";
+    addLibraryBtn.disabled = saved;
+  }
+
+  if (libraryId) {
+    setLibraryButtonSaved(true);
+  } else {
+    const existing = await findLibraryItemByUrl(pdfUrl);
+    if (existing) {
+      setLibraryButtonSaved(true);
+    } else {
+      addLibraryBtn.addEventListener("click", async () => {
+        addLibraryBtn.disabled = true;
+        const ok = await addLibraryItem({
+          type: "pdf",
+          sourceKind: "public",
+          url: pdfUrl,
+          title: document.title,
+          faviconUrl: null,
+          snapshotText: null,
+          pdfBytes: null,
+          folderId: null,
+        });
+        if (ok) setLibraryButtonSaved(true);
+        else addLibraryBtn.disabled = false;
+      });
+    }
+  }
 
   // --- PDF.js ---
   const pdfjsLib = await import("../build/pdf.mjs");
@@ -146,7 +337,7 @@
 
     loadingEl.style.display = "none";
 
-    const filename = decodeURIComponent(pdfUrl.split("/").pop() || "Document");
+    const filename = libraryFilename || decodeURIComponent(pdfUrl.split("/").pop() || "Document");
     document.title = filename;
     filenameEl.textContent = filename;
     filenameEl.title = filename;
@@ -508,7 +699,7 @@
 
   // --- Download ---
   downloadBtn.addEventListener("click", () => {
-    const filename = decodeURIComponent(pdfUrl.split("/").pop() || "document.pdf");
+    const filename = libraryFilename || decodeURIComponent(pdfUrl.split("/").pop() || "document.pdf");
     const a = document.createElement("a");
     a.href = pdfUrl;
     a.download = filename.endsWith(".pdf") ? filename : filename + ".pdf";
@@ -893,7 +1084,7 @@
     return [];
   }
 
-  const outlineCacheKey = () => "synon-pdf-schema:" + pdfUrl;
+  const outlineCacheKey = () => "synon-pdf-schema:" + (libraryId || pdfUrl);
 
   // Decide how the outline is produced: embedded TOC, cached scan, auto-scan, or on-demand.
   async function initOutline() {
@@ -906,7 +1097,7 @@
       const cached = sessionStorage.getItem(outlineCacheKey());
       if (cached) schema = JSON.parse(cached);
     } catch {}
-    if (schema) { renderOutline(inferOutlineFromSchema(schema)); return; }
+    if (schema) { await finishOutline(schema); return; }
 
     // Large documents defer the scan so opening stays fast and streaming isn't defeated.
     if (pdf.numPages > outlineScanCap) {
@@ -921,7 +1112,7 @@
     outlinePaneEl.innerHTML = '<div class="toc-empty">Building outline…</div>';
     const schema = await parseFullPdf(pdf);
     try { sessionStorage.setItem(outlineCacheKey(), JSON.stringify(schema)); } catch {}
-    renderOutline(inferOutlineFromSchema(schema));
+    await finishOutline(schema);
   }
 
   function renderOutlineGenerateButton() {
@@ -937,6 +1128,57 @@
     wrap.appendChild(msg);
     wrap.appendChild(btn);
     outlinePaneEl.appendChild(wrap);
+  }
+
+  // --- LLM outline fallback, tried only once heuristics find nothing ---
+  function pdfCacheKey() {
+    return libraryId || pdfUrl;
+  }
+
+  function renderOutlineActionMessage(text, buttonText, onClick) {
+    outlinePaneEl.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "toc-empty";
+    const msg = document.createElement("div");
+    msg.textContent = text;
+    const btn = document.createElement("button");
+    btn.className = "toc-generate-btn";
+    btn.textContent = buttonText;
+    btn.addEventListener("click", () => { btn.disabled = true; onClick(); });
+    wrap.appendChild(msg);
+    wrap.appendChild(btn);
+    outlinePaneEl.appendChild(wrap);
+  }
+
+  async function finishOutline(schema) {
+    const nodes = inferOutlineFromSchema(schema);
+    if (nodes.length > 0) { renderOutline(nodes); return; }
+    await handleNoHeuristicOutline(schema);
+  }
+
+  async function handleNoHeuristicOutline(schema) {
+    // Once a PDF has been checked before (found something or genuinely
+    // nothing), never call the LLM again for it automatically.
+    const cached = await getCachedOutline(pdfCacheKey());
+    if (cached !== undefined) {
+      renderOutline(cached.nodes || []);
+      return;
+    }
+    renderOutlineActionMessage("No outline detected.", "Generate outline with AI", () => runLlmOutlineGeneration(schema));
+  }
+
+  async function runLlmOutlineGeneration(schema) {
+    outlinePaneEl.innerHTML = '<div class="toc-empty">Asking AI for an outline…</div>';
+    const candidates = buildOutlineCandidates(schema);
+    const nodes = await requestLlmOutline(candidates);
+    if (nodes === null) {
+      // Call itself failed (no key, timeout, network, bad reply) — stays
+      // retryable, not cached, so a transient failure isn't permanent.
+      renderOutlineActionMessage("Couldn't generate an outline right now.", "Retry", () => runLlmOutlineGeneration(schema));
+      return;
+    }
+    await setCachedOutline(pdfCacheKey(), nodes);
+    renderOutline(nodes);
   }
 
   function renderOutline(tree) {

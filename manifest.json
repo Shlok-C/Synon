@@ -19,7 +19,7 @@
       "run_at": "document_idle"
     }
   ],
-  "permissions": ["activeTab", "storage", "contextMenus", "webNavigation"],
+  "permissions": ["activeTab", "storage", "contextMenus", "webNavigation", "unlimitedStorage"],
   "host_permissions": ["<all_urls>"],
   "web_accessible_resources": [{
     "resources": ["pdfjs/*"],
