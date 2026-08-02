@@ -528,6 +528,33 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
   });
 });
 
+// Content-Type-based PDF detection (catches PDFs served without a .pdf URL
+// extension, e.g. arXiv's canonical /pdf/<id> URLs). Non-blocking observer —
+// the redirect itself happens via a separate chrome.tabs.update call, same as
+// the onBeforeNavigate listener above, since MV3 disallows synchronous
+// blocking webRequest listeners for regular extensions.
+chrome.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    if (details.tabId < 0) return;
+    if (isPdfUrl(details.url)) return; // already handled by onBeforeNavigate
+    if (details.url.startsWith(chrome.runtime.getURL(""))) return;
+
+    const contentType = details.responseHeaders?.find(
+      (h) => h.name.toLowerCase() === "content-type"
+    )?.value;
+    if (!contentType?.toLowerCase().startsWith("application/pdf")) return;
+
+    debugTrace("onHeadersReceived:pdfMatch", { tabId: details.tabId, url: details.url, contentType });
+    chrome.storage.sync.get("pdfViewerEnabled", (result) => {
+      debugTrace("onHeadersReceived:settingRead", { pdfViewerEnabled: result.pdfViewerEnabled });
+      if (result.pdfViewerEnabled === false) return;
+      chrome.tabs.update(details.tabId, { url: getViewerUrl(details.url) });
+    });
+  },
+  { urls: ["<all_urls>"], types: ["main_frame"] },
+  ["responseHeaders"]
+);
+
 // --- Context menu + PDF tab restore ---
 chrome.runtime.onInstalled.addListener((details) => {
   debugTrace("onInstalled", { reason: details.reason });
