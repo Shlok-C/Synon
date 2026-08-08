@@ -275,11 +275,11 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   function loadSettings() {
     return new Promise((resolve) => {
       chrome.storage.sync.get(
-        ["pdfViewMode", "pdfSidebarOpen", "pdfSidebarTab", "pdfStreaming", "pdfRenderWindow", "pdfOutlineScanCap"],
+        ["pdfSidebarOpen", "pdfSidebarTab", "pdfStreaming", "pdfRenderWindow", "pdfOutlineScanCap"],
         (r) => {
-          if (r.pdfViewMode === "two-up" || r.pdfViewMode === "grid" || r.pdfViewMode === "single") {
-            viewMode = r.pdfViewMode;
-          }
+          // viewMode intentionally NOT restored from storage — every PDF should
+          // always open single-page by default, regardless of what mode was last
+          // used elsewhere. See setViewMode(): the choice only applies in-session.
           if (typeof r.pdfSidebarOpen === "boolean") sidebarOpen = r.pdfSidebarOpen;
           if (r.pdfSidebarTab === "outline" || r.pdfSidebarTab === "thumb") {
             sidebarTab = r.pdfSidebarTab;
@@ -1315,7 +1315,8 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   function setViewMode(mode) {
     if (mode === viewMode) return;
     viewMode = mode;
-    saveSetting("pdfViewMode", mode);
+    // Not persisted — view mode is per-session only; new/reopened PDFs always
+    // start single-page (see loadSettings()).
     applyViewMode();
     rerender();
   }
