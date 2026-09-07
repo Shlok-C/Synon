@@ -1,4 +1,15 @@
-import { addItem, listItems, listFolders, createFolder, deleteItem, moveItemToFolder, moveFolderOrder } from "../shared/library-db";
+import {
+  addItem,
+  listItems,
+  listFolders,
+  createFolder,
+  deleteItem,
+  moveItemToFolder,
+  moveFolderOrder,
+  renameItem,
+  renameFolder,
+  deleteFolder,
+} from "../shared/library-db";
 import type { LibraryItem, LibraryFolder } from "../shared/types";
 import { MSG_GET_ARTICLE_SNAPSHOT, type ArticleSnapshotResponse } from "../shared/messages";
 
@@ -211,11 +222,8 @@ const addCurrentPageBtn = document.getElementById("addCurrentPageBtn") as HTMLBu
 const uploadPdfBtn = document.getElementById("uploadPdfBtn") as HTMLButtonElement;
 const uploadPdfInput = document.getElementById("uploadPdfInput") as HTMLInputElement;
 const libStatus = document.getElementById("libStatus") as HTMLDivElement;
-const newFolderBtn = document.getElementById("newFolderBtn") as HTMLButtonElement;
-const newFolderRow = document.getElementById("newFolderRow") as HTMLDivElement;
 const newFolderNameInput = document.getElementById("newFolderName") as HTMLInputElement;
 const createFolderBtn = document.getElementById("createFolderBtn") as HTMLButtonElement;
-const cancelFolderBtn = document.getElementById("cancelFolderBtn") as HTMLButtonElement;
 const libraryTreeEl = document.getElementById("libraryTree") as HTMLDivElement;
 
 function viewerBaseUrl(): string {
@@ -251,9 +259,49 @@ function openLibraryItem(item: LibraryItem): void {
   }
 }
 
+function startInlineRename(
+  container: Element,
+  displayEl: HTMLElement,
+  currentValue: string,
+  commit: (newValue: string) => Promise<void>
+): void {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "lib-inline-input";
+  input.value = currentValue;
+  container.replaceChild(input, displayEl);
+  input.focus();
+  input.select();
+
+  input.addEventListener("mousedown", (e) => e.stopPropagation());
+  input.addEventListener("click", (e) => e.stopPropagation());
+
+  let cancelled = false;
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      input.blur();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelled = true;
+      void renderLibrary();
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    if (cancelled) return;
+    void (async () => {
+      const newValue = input.value.trim();
+      if (newValue && newValue !== currentValue) await commit(newValue);
+      await renderLibrary();
+    })();
+  });
+}
+
 function buildItemRow(item: LibraryItem, folders: LibraryFolder[]): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "lib-item";
+  row.title = item.title;
 
   const badge = document.createElement("span");
   badge.className = "lib-item-badge";
@@ -277,12 +325,22 @@ function buildItemRow(item: LibraryItem, folders: LibraryFolder[]): HTMLDivEleme
   row.appendChild(folderSelect);
 
   const openBtn = document.createElement("button");
-  openBtn.textContent = "Open";
+  openBtn.textContent = "↗";
+  openBtn.title = "Open";
   openBtn.addEventListener("click", () => openLibraryItem(item));
   row.appendChild(openBtn);
 
+  const renameBtn = document.createElement("button");
+  renameBtn.textContent = "✎";
+  renameBtn.title = "Rename";
+  renameBtn.addEventListener("click", () => {
+    startInlineRename(row, title, item.title, (newTitle) => renameItem(item.id, newTitle));
+  });
+  row.appendChild(renameBtn);
+
   const deleteBtn = document.createElement("button");
-  deleteBtn.textContent = "Delete";
+  deleteBtn.textContent = "🗑";
+  deleteBtn.title = "Delete";
   deleteBtn.addEventListener("click", async () => {
     await deleteItem(item.id);
     await renderLibrary();
@@ -318,6 +376,27 @@ function buildFolderNode(
   const actions = document.createElement("span");
   actions.className = "folder-node-actions";
 
+  const renameBtn = document.createElement("button");
+  renameBtn.textContent = "✎";
+  renameBtn.title = "Rename folder";
+  renameBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    startInlineRename(summary, name, folder.name, (newName) => renameFolder(folder.id, newName));
+  });
+  actions.appendChild(renameBtn);
+
+  const deleteFolderBtn = document.createElement("button");
+  deleteFolderBtn.textContent = "🗑";
+  deleteFolderBtn.title = "Delete folder";
+  deleteFolderBtn.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await deleteFolder(folder.id);
+    await renderLibrary();
+  });
+  actions.appendChild(deleteFolderBtn);
+
   const upBtn = document.createElement("button");
   upBtn.textContent = "▲";
   upBtn.title = "Move folder up";
@@ -345,29 +424,6 @@ function buildFolderNode(
   node.appendChild(buildFolderBody(items, allFolders, "No items in this folder."));
 
   void applyPersistedOpenState(node, `library:folder:${folder.id}`);
-
-  return node;
-}
-
-function buildUnfiledNode(items: LibraryItem[], allFolders: LibraryFolder[]): HTMLDetailsElement {
-  const node = document.createElement("details");
-  node.className = "folder-node";
-
-  const summary = document.createElement("summary");
-  const name = document.createElement("span");
-  name.className = "folder-node-name";
-  name.textContent = "Unfiled";
-  summary.appendChild(name);
-
-  const count = document.createElement("span");
-  count.className = "folder-node-count";
-  count.textContent = String(items.length);
-  summary.appendChild(count);
-
-  node.appendChild(summary);
-  node.appendChild(buildFolderBody(items, allFolders, "No unfiled items."));
-
-  void applyPersistedOpenState(node, "library:unfiled");
 
   return node;
 }
@@ -411,24 +467,22 @@ async function renderLibrary(): Promise<void> {
     );
   });
 
-  libraryTreeEl.appendChild(buildUnfiledNode(unfiledItems, folders));
+  if (unfiledItems.length > 0) {
+    const label = document.createElement("div");
+    label.className = "lib-unfiled-label";
+    label.textContent = "Unfiled";
+    libraryTreeEl.appendChild(label);
+    for (const item of unfiledItems.sort((a, b) => b.dateAdded - a.dateAdded)) {
+      libraryTreeEl.appendChild(buildItemRow(item, folders));
+    }
+  }
 }
-
-newFolderBtn.addEventListener("click", () => {
-  newFolderRow.hidden = false;
-  newFolderNameInput.value = "";
-  newFolderNameInput.focus();
-});
-
-cancelFolderBtn.addEventListener("click", () => {
-  newFolderRow.hidden = true;
-});
 
 createFolderBtn.addEventListener("click", async () => {
   const name = newFolderNameInput.value.trim();
   if (!name) return;
   await createFolder(name);
-  newFolderRow.hidden = true;
+  newFolderNameInput.value = "";
   await renderLibrary();
 });
 
@@ -501,3 +555,5 @@ uploadPdfInput.addEventListener("change", async () => {
     libStatus.textContent = "Couldn't upload this file.";
   }
 });
+
+switchTab("library");

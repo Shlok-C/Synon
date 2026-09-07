@@ -42,10 +42,7 @@
       font-size: 12px;
       padding: 6px 4px;
     }
-    .lib-tree-actions {
-      margin-top: 12px;
-    }
-    .lib-tree-actions button, #newFolderRow button {
+    #newFolderRow button {
       margin-top: 0;
       font-size: 12px;
       padding: 5px 8px;
@@ -53,7 +50,7 @@
     #newFolderRow {
       display: flex;
       gap: 6px;
-      margin-top: 6px;
+      margin-top: 12px;
     }
     #newFolderRow input {
       flex: 1;
@@ -144,11 +141,28 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .lib-inline-input {
+      flex: 1;
+      min-width: 0;
+      font: inherit;
+      padding: 1px 3px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      box-sizing: border-box;
+    }
     .lib-item select, .lib-item button {
       margin-top: 0;
       font-size: 11px;
       padding: 3px 5px;
       flex-shrink: 0;
+    }
+    .lib-unfiled-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin: 10px 0 4px;
     }
     .lib-empty {
       font-size: 13px;
@@ -377,13 +391,9 @@
     </div>
     <div id="libStatus"></div>
 
-    <div class="lib-tree-actions">
-      <button id="newFolderBtn">+ Folder</button>
-    </div>
-    <div id="newFolderRow" hidden>
-      <input type="text" id="newFolderName" placeholder="Folder name" />
+    <div id="newFolderRow">
+      <input type="text" id="newFolderName" placeholder="New folder name" />
       <button id="createFolderBtn">Create</button>
-      <button id="cancelFolderBtn">Cancel</button>
     </div>
 
     <div id="libraryTree"></div>

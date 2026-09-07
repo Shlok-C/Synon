@@ -84,6 +84,15 @@ export async function moveItemToFolder(
   await promisifyRequest(store.put(item));
 }
 
+export async function renameItem(id: string, title: string): Promise<void> {
+  const db = await openDb();
+  const store = db.transaction(ITEMS_STORE, "readwrite").objectStore(ITEMS_STORE);
+  const item = await promisifyRequest(store.get(id));
+  if (!item) return;
+  item.title = title;
+  await promisifyRequest(store.put(item));
+}
+
 export async function getItemBytes(id: string): Promise<Blob | null> {
   const db = await openDb();
   const store = db.transaction(ITEMS_STORE, "readonly").objectStore(ITEMS_STORE);
