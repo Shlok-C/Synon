@@ -3,39 +3,41 @@
 // src/shared/library-db.ts's schema; kept as a small standalone copy since
 // this file is plain JS copied verbatim by build.mjs, not bundled through
 // the TS entry points.
-function openLibraryDb() {
+// Wraps an IDBRequest's onsuccess/onerror callbacks in a Promise.
+function idbRequest(req) {
   return new Promise((resolve, reject) => {
-    // Version must stay in lockstep with src/shared/library-db.ts's DB_VERSION —
-    // IndexedDB versioning is global per database name, not per caller, so a
-    // mismatch throws a VersionError in whichever context opens second.
-    const req = indexedDB.open("synon-library", 2);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains("items")) {
-        const items = db.createObjectStore("items", { keyPath: "id" });
-        items.createIndex("folderId", "folderId");
-      }
-      if (!db.objectStoreNames.contains("folders")) {
-        db.createObjectStore("folders", { keyPath: "id" });
-      }
-      if (!db.objectStoreNames.contains("outlineCache")) {
-        db.createObjectStore("outlineCache", { keyPath: "pdfKey" });
-      }
-    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
+}
+
+function openLibraryDb() {
+  // Version must stay in lockstep with src/shared/library-db.ts's DB_VERSION —
+  // IndexedDB versioning is global per database name, not per caller, so a
+  // mismatch throws a VersionError in whichever context opens second.
+  const req = indexedDB.open("synon-library", 2);
+  req.onupgradeneeded = () => {
+    const db = req.result;
+    if (!db.objectStoreNames.contains("items")) {
+      const items = db.createObjectStore("items", { keyPath: "id" });
+      items.createIndex("folderId", "folderId");
+    }
+    if (!db.objectStoreNames.contains("folders")) {
+      db.createObjectStore("folders", { keyPath: "id" });
+    }
+    if (!db.objectStoreNames.contains("outlineCache")) {
+      db.createObjectStore("outlineCache", { keyPath: "pdfKey" });
+    }
+  };
+  return idbRequest(req);
 }
 
 async function loadLibraryItem(id) {
   try {
     const db = await openLibraryDb();
     if (!db.objectStoreNames.contains("items")) return null;
-    return await new Promise((resolve, reject) => {
-      const req = db.transaction("items", "readonly").objectStore("items").get(id);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => reject(req.error);
-    });
+    const item = await idbRequest(db.transaction("items", "readonly").objectStore("items").get(id));
+    return item || null;
   } catch {
     return null;
   }
@@ -45,12 +47,8 @@ async function findLibraryItemByUrl(url) {
   try {
     const db = await openLibraryDb();
     if (!db.objectStoreNames.contains("items")) return null;
-    const all = await new Promise((resolve, reject) => {
-      const req = db.transaction("items", "readonly").objectStore("items").getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
-    });
-    return all.find((i) => i.type === "pdf" && i.sourceKind === "public" && i.url === url) || null;
+    const all = await idbRequest(db.transaction("items", "readonly").objectStore("items").getAll());
+    return (all || []).find((i) => i.type === "pdf" && i.sourceKind === "public" && i.url === url) || null;
   } catch {
     return null;
   }
@@ -60,11 +58,7 @@ async function addLibraryItem(item) {
   try {
     const db = await openLibraryDb();
     const full = Object.assign({}, item, { id: crypto.randomUUID(), dateAdded: Date.now() });
-    await new Promise((resolve, reject) => {
-      const req = db.transaction("items", "readwrite").objectStore("items").add(full);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
+    await idbRequest(db.transaction("items", "readwrite").objectStore("items").add(full));
     return true;
   } catch {
     return false;
@@ -78,11 +72,7 @@ async function getCachedOutline(pdfKey) {
   try {
     const db = await openLibraryDb();
     if (!db.objectStoreNames.contains("outlineCache")) return undefined;
-    return await new Promise((resolve, reject) => {
-      const req = db.transaction("outlineCache", "readonly").objectStore("outlineCache").get(pdfKey);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
+    return await idbRequest(db.transaction("outlineCache", "readonly").objectStore("outlineCache").get(pdfKey));
   } catch {
     return undefined;
   }
@@ -92,18 +82,19 @@ async function setCachedOutline(pdfKey, nodes) {
   try {
     const db = await openLibraryDb();
     const record = { pdfKey, nodes, cachedAt: Date.now() };
-    await new Promise((resolve, reject) => {
-      const req = db.transaction("outlineCache", "readwrite").objectStore("outlineCache").put(record);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
+    await idbRequest(db.transaction("outlineCache", "readwrite").objectStore("outlineCache").put(record));
   } catch {
     // Cache failures (quota, private mode) shouldn't block showing the result.
   }
 }
 
-// Same noise filter inferOutlineFromSchema applies internally, plus a
-// short-line cap (headings are short; this excludes body paragraphs) and a
+// Shared with inferOutlineFromSchema below — a run this excludes is never a heading candidate.
+function isNoiseRun(r) {
+  return r.isMargin || r.isTocPage || r.isRunningHeader;
+}
+
+// buildOutlineCandidates applies the same noise filter as inferOutlineFromSchema,
+// plus a short-line cap (headings are short; this excludes body paragraphs) and a
 // total-character budget to bound the LLM prompt's size/cost.
 const OUTLINE_CANDIDATE_MAX_LINE_LEN = 120;
 const OUTLINE_CANDIDATE_MAX_CHARS = 6000;
@@ -112,7 +103,7 @@ function buildOutlineCandidates(schema) {
   const candidates = [];
   let totalChars = 0;
   for (const r of schema.runs) {
-    if (r.isMargin || r.isTocPage || r.isRunningHeader) continue;
+    if (isNoiseRun(r)) continue;
     const text = r.text.trim();
     if (!text || text.length > OUTLINE_CANDIDATE_MAX_LINE_LEN) continue;
     if (totalChars + text.length > OUTLINE_CANDIDATE_MAX_CHARS) break;
@@ -131,6 +122,8 @@ function buildOutlineCandidates(schema) {
 function requestLlmOutline(candidates, timeoutMs = 20000) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(null), timeoutMs);
+    // Payload shape must match GeneratePdfOutlineMessage in src/shared/messages.ts —
+    // this file is plain JS outside the TS bundle and can't import that type directly.
     chrome.runtime.sendMessage({ type: "GENERATE_PDF_OUTLINE", candidates }, (response) => {
       clearTimeout(timer);
       if (chrome.runtime.lastError || !response) {
@@ -147,6 +140,9 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   let pdfUrl = params.get("file");
   const libraryId = params.get("libraryId");
   let libraryFilename = null;
+  // True when the content script swapped an <embed>/<object>/<iframe> PDF on a
+  // normal page for this viewer. Such an instance doesn't own the tab.
+  const embedded = window.top !== window;
 
   if (!pdfUrl && libraryId) {
     const item = await loadLibraryItem(libraryId);
@@ -183,8 +179,8 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   const addLibraryBtn = document.getElementById("add-library-btn");
 
   if (!pdfUrl) {
-    loadingEl.style.display = "none";
-    errorEl.style.display = "block";
+    loadingEl.hidden = true;
+    errorEl.hidden = false;
     errorEl.textContent = "No PDF URL provided.";
     return;
   }
@@ -194,7 +190,11 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   // restore) are tracked for reload-recovery just like freshly-redirected ones.
   // Skipped for local library items: their pdfUrl is a blob: URL scoped to this
   // viewer instance, which would be dead by the time a restore tried to reuse it.
-  if (!libraryId) {
+  // Also skipped when embedded in a page: the tab belongs to the host page, and
+  // registering it would reopen the bare PDF in a new tab on extension reload.
+  if (!libraryId && !embedded) {
+    // Payload shape must match PDFViewerOpenedMessage in src/shared/messages.ts —
+    // this file is plain JS outside the TS bundle and can't import that type directly.
     chrome.runtime.sendMessage({ type: "PDF_VIEWER_OPENED", url: pdfUrl });
   }
 
@@ -243,7 +243,8 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   let sidebarOpen = true;
   let sidebarTab = "thumb"; // "thumb" | "outline"
 
-  let scale = 1.5;
+  const DEFAULT_SCALE = 1.5; // 100% zoom
+  let scale = DEFAULT_SCALE;
   const SCALE_STEP = 0.25;
   const SCALE_MIN = 0.5;
   const SCALE_MAX = 5.0;
@@ -265,7 +266,7 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   const renderedThumbs = new Set();
   let thumbObserver = null;
 
-  let outlineEntries = []; // flat list of { row, pageIndex, childrenContainer, chevron, hasChildren }
+  let outlineEntries = []; // flat list of { row, pageIndex } — the only fields updateActiveOutlineEntry reads
 
   function effectiveScale() {
     return viewMode === "grid" ? scale * GRID_SCALE_FACTOR : scale;
@@ -280,7 +281,10 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
           // viewMode intentionally NOT restored from storage — every PDF should
           // always open single-page by default, regardless of what mode was last
           // used elsewhere. See setViewMode(): the choice only applies in-session.
-          if (typeof r.pdfSidebarOpen === "boolean") sidebarOpen = r.pdfSidebarOpen;
+          // An embedded viewer is usually a narrow box in someone's page — give
+          // the page itself the room; the sidebar is one click away.
+          if (embedded) sidebarOpen = false;
+          else if (typeof r.pdfSidebarOpen === "boolean") sidebarOpen = r.pdfSidebarOpen;
           if (r.pdfSidebarTab === "outline" || r.pdfSidebarTab === "thumb") {
             sidebarTab = r.pdfSidebarTab;
           }
@@ -301,17 +305,39 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
     chrome.storage.sync.set({ [key]: value });
   }
 
+  function getFilename() {
+    return libraryFilename || decodeURIComponent(pdfUrl.split("/").pop() || "Document");
+  }
+
+  // Opens pdfUrl outside Synon. The background is told to let this URL through
+  // first (PDF_BYPASS, shape must match PDFBypassMessage in
+  // src/shared/messages.ts), otherwise its PDF detection would redirect the
+  // navigation straight back here. Embedded viewers open a new tab instead of
+  // navigating their own frame: the content script would re-wrap a PDF frame,
+  // and it can't see the bypass list.
+  function openOriginal() {
+    chrome.runtime.sendMessage({ type: "PDF_BYPASS", url: pdfUrl }, () => {
+      void chrome.runtime.lastError;
+      if (embedded) window.open(pdfUrl, "_blank", "noopener");
+      else location.href = pdfUrl;
+    });
+  }
+
   // --- Main load ---
   async function loadPdf() {
-    loadingEl.style.display = "block";
-    errorEl.style.display = "none";
+    loadingEl.hidden = false;
+    errorEl.hidden = true;
     viewerEl.innerHTML = "";
     toolbarEl.style.display = "none";
-    scale = 1.5; // open at 100% zoom
+    scale = DEFAULT_SCALE;
 
     try {
       const loadingTask = pdfjsLib.getDocument({
         url: pdfUrl,
+        // Send the site's cookies, so PDFs behind a login (course portals,
+        // webmail attachments) load like they did in the original tab. The
+        // extension's <all_urls> host permission exempts this from CORS.
+        withCredentials: !libraryId,
         rangeChunkSize: 65536,
         disableAutoFetch: streamingEnabled,
         disableStream: false,
@@ -323,8 +349,8 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
       };
       pdf = await loadingTask.promise;
     } catch (err) {
-      loadingEl.style.display = "none";
-      errorEl.style.display = "block";
+      loadingEl.hidden = true;
+      errorEl.hidden = false;
       errorEl.innerHTML = "";
       errorEl.appendChild(document.createTextNode("Failed to load PDF: " + err.message));
       const retryBtn = document.createElement("button");
@@ -332,12 +358,21 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
       retryBtn.addEventListener("click", loadPdf);
       errorEl.appendChild(document.createElement("br"));
       errorEl.appendChild(retryBtn);
+      if (!libraryId) {
+        // Hand the URL back to Chrome: it shows the PDF natively, or downloads
+        // it if that's what the server intends.
+        const originalBtn = document.createElement("button");
+        originalBtn.textContent = "Open original";
+        originalBtn.addEventListener("click", openOriginal);
+        errorEl.appendChild(document.createTextNode(" "));
+        errorEl.appendChild(originalBtn);
+      }
       return;
     }
 
-    loadingEl.style.display = "none";
+    loadingEl.hidden = true;
 
-    const filename = libraryFilename || decodeURIComponent(pdfUrl.split("/").pop() || "Document");
+    const filename = getFilename();
     document.title = filename;
     filenameEl.textContent = filename;
     filenameEl.title = filename;
@@ -368,19 +403,42 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
     evictDistantPages();
   }
 
-  // Restore a rendered page back to a lightweight placeholder, freeing its canvas.
-  function resetToPlaceholder(index) {
-    const container = pageContainers[index];
-    if (!container) return;
+  // Cancels a page's in-flight render task, if any, and clears the marker field.
+  function cancelRenderTask(container) {
     if (container._renderTask) {
       try { container._renderTask.cancel(); } catch {}
       container._renderTask = null;
     }
+  }
+
+  // Resets a page container to its placeholder appearance (used both when
+  // freshly creating containers and when evicting a previously-rendered page).
+  function applyPlaceholderStyle(container, index) {
     container.innerHTML = "";
     container.className = "page-container page page-placeholder";
     if (placeholderW) container.style.width = placeholderW;
     if (placeholderH) container.style.height = placeholderH;
     container.textContent = "Page " + (index + 1);
+  }
+
+  // Computes the placeholder canvas size from page 1's viewport at the
+  // current scale/rotation, snapped to whole device pixels.
+  async function computePlaceholderSize() {
+    const firstPage = await pdf.getPage(1);
+    const defaultVp = firstPage.getViewport({ scale: effectiveScale(), rotation });
+    const dpr = window.devicePixelRatio || 1;
+    return {
+      w: (Math.ceil(defaultVp.width * dpr) / dpr) + "px",
+      h: (Math.ceil(defaultVp.height * dpr) / dpr) + "px",
+    };
+  }
+
+  // Restore a rendered page back to a lightweight placeholder, freeing its canvas.
+  function resetToPlaceholder(index) {
+    const container = pageContainers[index];
+    if (!container) return;
+    cancelRenderTask(container);
+    applyPlaceholderStyle(container, index);
     renderedPages.delete(index);
   }
 
@@ -430,7 +488,7 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   });
 
   function updateZoomLabel() {
-    zoomLevelEl.textContent = Math.round((scale / 1.5) * 100) + "%";
+    zoomLevelEl.textContent = Math.round((scale / DEFAULT_SCALE) * 100) + "%";
   }
 
   // --- Page rendering ---
@@ -507,9 +565,7 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
             // Cancel a still-pending render for a page that scrolled away mid-render
             // (_renderTask is non-null only while a render is in flight).
             const c = pageContainers[idx];
-            if (c && c._renderTask) {
-              try { c._renderTask.cancel(); } catch {}
-            }
+            if (c) cancelRenderTask(c);
           }
         }
       },
@@ -543,21 +599,13 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
     viewerEl.style.setProperty("--scale-factor", String(effectiveScale()));
     updateZoomLabel();
 
-    const firstPage = await pdf.getPage(1);
-    const defaultVp = firstPage.getViewport({ scale: effectiveScale(), rotation });
-
-    const initDpr = window.devicePixelRatio || 1;
-    const phW = (Math.ceil(defaultVp.width * initDpr) / initDpr) + "px";
-    const phH = (Math.ceil(defaultVp.height * initDpr) / initDpr) + "px";
-    placeholderW = phW;
-    placeholderH = phH;
+    const ph = await computePlaceholderSize();
+    placeholderW = ph.w;
+    placeholderH = ph.h;
     for (let i = 0; i < pdf.numPages; i++) {
       const container = document.createElement("div");
-      container.className = "page-container page page-placeholder";
       container.setAttribute("data-page-number", String(i + 1));
-      container.style.width = phW;
-      container.style.height = phH;
-      container.textContent = "Page " + (i + 1);
+      applyPlaceholderStyle(container, i);
       viewerEl.appendChild(container);
       pageContainers.push(container);
     }
@@ -596,31 +644,17 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
     visiblePages.clear();
     if (observer) observer.disconnect();
     // Cancel any in-flight renders before tearing down their canvases.
-    for (const container of pageContainers) {
-      if (container._renderTask) {
-        try { container._renderTask.cancel(); } catch {}
-        container._renderTask = null;
-      }
-    }
+    for (const container of pageContainers) cancelRenderTask(container);
 
     viewerEl.style.setProperty("--scale-factor", String(effectiveScale()));
     updateZoomLabel();
 
-    const firstPage = await pdf.getPage(1);
-    const defaultVp = firstPage.getViewport({ scale: effectiveScale(), rotation });
-    const dpr = window.devicePixelRatio || 1;
-    const phW = (Math.ceil(defaultVp.width * dpr) / dpr) + "px";
-    const phH = (Math.ceil(defaultVp.height * dpr) / dpr) + "px";
-    placeholderW = phW;
-    placeholderH = phH;
+    const ph = await computePlaceholderSize();
+    placeholderW = ph.w;
+    placeholderH = ph.h;
 
     for (let i = 0; i < pageContainers.length; i++) {
-      const container = pageContainers[i];
-      container.innerHTML = "";
-      container.className = "page-container page page-placeholder";
-      container.style.width = phW;
-      container.style.height = phH;
-      container.textContent = "Page " + (i + 1);
+      applyPlaceholderStyle(pageContainers[i], i);
     }
 
     requestAnimationFrame(() => {
@@ -649,6 +683,11 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   function zoomOut() {
     if (scale <= SCALE_MIN) return;
     scale = Math.max(scale - SCALE_STEP, SCALE_MIN);
+    rerender();
+  }
+
+  function resetZoom() {
+    scale = DEFAULT_SCALE;
     rerender();
   }
 
@@ -698,15 +737,26 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   });
 
   // --- Download ---
-  downloadBtn.addEventListener("click", () => {
-    const filename = libraryFilename || decodeURIComponent(pdfUrl.split("/").pop() || "document.pdf");
-    const a = document.createElement("a");
-    a.href = pdfUrl;
-    a.download = filename.endsWith(".pdf") ? filename : filename + ".pdf";
-    a.rel = "noopener";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  // Saves the bytes pdf.js already holds via a same-origin blob: URL. A plain
+  // <a download href=pdfUrl> doesn't work here: Chrome ignores `download` on
+  // cross-origin links and navigates instead, which just reopened the viewer.
+  downloadBtn.addEventListener("click", async () => {
+    if (!pdf) return;
+    const filename = getFilename();
+    downloadBtn.disabled = true;
+    try {
+      const data = await pdf.getData();
+      const blobUrl = URL.createObjectURL(new Blob([data], { type: "application/pdf" }));
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = filename.toLowerCase().endsWith(".pdf") ? filename : filename + ".pdf";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    } finally {
+      downloadBtn.disabled = false;
+    }
   });
 
   // --- Print ---
@@ -724,6 +774,17 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   document.addEventListener("keydown", (e) => {
     const target = e.target;
     if (target === pageInputEl) return;
+    // Ctrl+Left/Right switches tabs — mirrors content/index.ts, since content
+    // scripts don't run on this extension page. Text fields keep word-jumping.
+    if (
+      e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey &&
+      (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+      !(target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+    ) {
+      e.preventDefault();
+      chrome.runtime.sendMessage({ type: "SWITCH_TAB", direction: e.key === "ArrowRight" ? "next" : "prev" });
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && (e.key === "=" || e.key === "+")) {
       e.preventDefault();
       zoomIn();
@@ -732,8 +793,7 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
       zoomOut();
     } else if ((e.ctrlKey || e.metaKey) && e.key === "0") {
       e.preventDefault();
-      scale = 1.5;
-      rerender();
+      resetZoom();
     }
   });
 
@@ -783,10 +843,12 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   });
 
   // --- Sidebar tabs + toggle ---
+  const sidebarTabEls = document.querySelectorAll("#sidebar-tabs .tab");
+
   function applySidebarState() {
     sidebarEl.classList.toggle("open", sidebarOpen);
     sidebarToggleEl.classList.toggle("active", sidebarOpen);
-    document.querySelectorAll("#sidebar-tabs .tab").forEach((t) => {
+    sidebarTabEls.forEach((t) => {
       t.classList.toggle("active", t.dataset.tab === sidebarTab);
     });
     thumbPaneEl.hidden = sidebarTab !== "thumb";
@@ -795,11 +857,11 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
 
   sidebarToggleEl.addEventListener("click", () => {
     sidebarOpen = !sidebarOpen;
-    saveSetting("pdfSidebarOpen", sidebarOpen);
+    if (!embedded) saveSetting("pdfSidebarOpen", sidebarOpen);
     applySidebarState();
   });
 
-  document.querySelectorAll("#sidebar-tabs .tab").forEach((tab) => {
+  sidebarTabEls.forEach((tab) => {
     tab.addEventListener("click", () => {
       sidebarTab = tab.dataset.tab;
       saveSetting("pdfSidebarTab", sidebarTab);
@@ -1049,7 +1111,7 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
   function inferOutlineFromSchema(schema) {
     const { runs } = schema;
     // Strip noise before any signal-priority logic.
-    const candidates = runs.filter((r) => !r.isMargin && !r.isTocPage && !r.isRunningHeader);
+    const candidates = runs.filter((r) => !isNoiseRun(r));
     function dedupe(subset) {
       const seen = new Set();
       return subset.filter((r) => {
@@ -1101,7 +1163,7 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
 
     // Large documents defer the scan so opening stays fast and streaming isn't defeated.
     if (pdf.numPages > outlineScanCap) {
-      renderOutlineGenerateButton();
+      renderOutlineActionMessage("Large document (" + pdf.numPages + " pages).", "Generate outline", runOutlineScan);
       return;
     }
 
@@ -1113,21 +1175,6 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
     const schema = await parseFullPdf(pdf);
     try { sessionStorage.setItem(outlineCacheKey(), JSON.stringify(schema)); } catch {}
     await finishOutline(schema);
-  }
-
-  function renderOutlineGenerateButton() {
-    outlinePaneEl.innerHTML = "";
-    const wrap = document.createElement("div");
-    wrap.className = "toc-empty";
-    const msg = document.createElement("div");
-    msg.textContent = "Large document (" + pdf.numPages + " pages).";
-    const btn = document.createElement("button");
-    btn.className = "toc-generate-btn";
-    btn.textContent = "Generate outline";
-    btn.addEventListener("click", () => { btn.disabled = true; runOutlineScan(); });
-    wrap.appendChild(msg);
-    wrap.appendChild(btn);
-    outlinePaneEl.appendChild(wrap);
   }
 
   // --- LLM outline fallback, tried only once heuristics find nothing ---
@@ -1229,7 +1276,7 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
       });
 
       parent.appendChild(row);
-      outlineEntries.push({ row, pageIndex: node.pageIndex, childrenContainer, chevron, hasChildren });
+      outlineEntries.push({ row, pageIndex: node.pageIndex });
 
       if (hasChildren) {
         for (const child of node.children) renderNode(child, childrenContainer, depth + 1);
@@ -1294,11 +1341,12 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
       setViewMode(btn.dataset.mode);
       moreMenuEl.hidden = true;
     } else if (btn.id === "reset-zoom") {
-      scale = 1.5;
-      rerender();
+      resetZoom();
       moreMenuEl.hidden = true;
     }
   });
+
+  const viewModeButtonEls = moreMenuEl.querySelectorAll("button[data-mode]");
 
   function applyViewMode() {
     viewerEl.classList.remove("two-up-mode", "grid-mode");
@@ -1307,7 +1355,7 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
 
     fitWidthBtn.disabled = viewMode === "grid";
 
-    moreMenuEl.querySelectorAll("button[data-mode]").forEach((b) => {
+    viewModeButtonEls.forEach((b) => {
       b.setAttribute("aria-checked", b.dataset.mode === viewMode ? "true" : "false");
     });
   }
@@ -1333,8 +1381,6 @@ function requestLlmOutline(candidates, timeoutMs = 20000) {
     setViewMode("single");
     setTimeout(() => goToPage(pageNum), 150);
   });
-
-  // Toolbar is always visible (no auto-hide); it stays at data-hidden="false".
 
   // --- Startup ---
   await loadSettings();

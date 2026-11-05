@@ -76,15 +76,8 @@
       font-weight: 500;
       list-style: none;
     }
-    .folder-node summary::-webkit-details-marker { display: none; }
     .folder-node summary::before {
-      content: "▸";
-      color: #888;
       font-size: 11px;
-      transition: transform 0.15s ease;
-    }
-    .folder-node[open] > summary::before {
-      transform: rotate(90deg);
     }
     .folder-node-name {
       flex: 1;
@@ -255,14 +248,22 @@
       color: #333;
       list-style: none;
     }
-    .settings-group summary::-webkit-details-marker { display: none; }
     .settings-group summary::before {
-      content: "▸";
       display: inline-block;
       margin-right: 6px;
+    }
+    /* Shared disclosure-triangle marker for both collapsible section styles above. */
+    .folder-node summary::-webkit-details-marker,
+    .settings-group summary::-webkit-details-marker {
+      display: none;
+    }
+    .folder-node summary::before,
+    .settings-group summary::before {
+      content: "▸";
       color: #888;
       transition: transform 0.15s ease;
     }
+    .folder-node[open] > summary::before,
     .settings-group[open] > summary::before {
       transform: rotate(90deg);
     }

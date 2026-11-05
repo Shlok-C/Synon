@@ -1,5 +1,5 @@
 export interface Definition {
-  source: string;
+  source: "Dictionary" | "Wikipedia" | "AI";
   text: string;
   url: string | null;
   rootWord?: string;
@@ -35,6 +35,7 @@ export interface PopupState {
   definitions: Definition[];
   index: number;
   schema?: PopupSchema;
+  pinned?: boolean; // user pressed ←/→ or clicked into the popup on this state — later updates keep the shown definition
 }
 
 export type SelectionType = "word" | "phrase" | "invalid";

@@ -23,13 +23,7 @@
       padding: 0 8px;
       z-index: 100;
       box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-      transition: transform 0.2s ease, opacity 0.2s ease;
       color: #fff;
-    }
-    #toolbar[data-hidden="true"] {
-      transform: translateY(-100%);
-      opacity: 0;
-      pointer-events: none;
     }
     .tb-cluster {
       display: flex;
@@ -323,7 +317,6 @@
       font-size: 16px;
       text-align: center;
       padding: 120px 20px;
-      display: none;
     }
     #error button {
       margin-top: 16px;
@@ -360,7 +353,7 @@
   </style>
 </head>
 <body>
-  <div id="toolbar" data-hidden="false">
+  <div id="toolbar">
     <div class="tb-cluster tb-left">
       <button id="sidebar-toggle" title="Show sidebar">
         <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
@@ -417,7 +410,7 @@
   </div>
 
   <div id="loading">Loading PDF&#8230;</div>
-  <div id="error"></div>
+  <div id="error" hidden></div>
 
   <div id="main-content">
     <aside id="sidebar">
