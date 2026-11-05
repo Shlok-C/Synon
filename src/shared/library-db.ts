@@ -1,4 +1,6 @@
 import type { LibraryFolder, LibraryItem } from "./types";
+import { MSG_GET_ARTICLE_SNAPSHOT, type ArticleSnapshotResponse, type GetArticleSnapshotMessage } from "./messages";
+import { getOriginalPdfUrlFromViewerUrl } from "./pdf-viewer-url";
 
 const DB_NAME = "synon-library";
 const DB_VERSION = 2;
@@ -56,6 +58,49 @@ export async function addItem(
   return full;
 }
 
+// Saves a browser tab into the Library: a PDF (if the tab is the Synon
+// viewer showing one) or an article snapshot otherwise. Caller validates
+// tab.id/tab.url are present first — behavior on a missing tab differs per
+// call site (silent no-op from the context menu vs. a status message in the
+// popup), so this assumes both are already known-good.
+export async function addTabToLibrary(tab: {
+  id: number;
+  url: string;
+  title?: string;
+  favIconUrl?: string;
+}): Promise<void> {
+  const originalPdfUrl = getOriginalPdfUrlFromViewerUrl(tab.url);
+  if (originalPdfUrl) {
+    await addItem({
+      type: "pdf",
+      sourceKind: "public",
+      url: originalPdfUrl,
+      title: tab.title || originalPdfUrl,
+      faviconUrl: tab.favIconUrl ?? null,
+      snapshotText: null,
+      pdfBytes: null,
+      folderId: null,
+    });
+    return;
+  }
+
+  const getSnapshotMessage: GetArticleSnapshotMessage = { type: MSG_GET_ARTICLE_SNAPSHOT };
+  const snapshot = (await chrome.tabs
+    .sendMessage(tab.id, getSnapshotMessage)
+    .catch(() => null)) as ArticleSnapshotResponse | null;
+
+  await addItem({
+    type: "article",
+    sourceKind: "public",
+    url: tab.url,
+    title: snapshot?.title || tab.title || tab.url,
+    faviconUrl: snapshot?.faviconUrl ?? tab.favIconUrl ?? null,
+    snapshotText: snapshot?.text ?? null,
+    pdfBytes: null,
+    folderId: null,
+  });
+}
+
 export async function listItems(
   folderId?: string | null
 ): Promise<LibraryItem[]> {
@@ -91,13 +136,6 @@ export async function renameItem(id: string, title: string): Promise<void> {
   if (!item) return;
   item.title = title;
   await promisifyRequest(store.put(item));
-}
-
-export async function getItemBytes(id: string): Promise<Blob | null> {
-  const db = await openDb();
-  const store = db.transaction(ITEMS_STORE, "readonly").objectStore(ITEMS_STORE);
-  const item = await promisifyRequest(store.get(id));
-  return item?.pdfBytes ?? null;
 }
 
 export async function createFolder(name: string): Promise<LibraryFolder> {

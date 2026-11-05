@@ -1,4 +1,5 @@
 import type { PageKind } from "../shared/types";
+import { isViewerPathname } from "../shared/pdf-viewer-url";
 
 export function isEmailPage(): boolean {
   const host = location.hostname;
@@ -56,7 +57,7 @@ function getGenericContext(selection: Selection): string {
 }
 
 function isPDFPage(): boolean {
-  return location.pathname.includes("pdfjs/web/viewer.html");
+  return isViewerPathname(location.pathname);
 }
 
 function getPDFContext(selection: Selection): string {

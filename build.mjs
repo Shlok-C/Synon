@@ -1,11 +1,11 @@
 import * as esbuild from "esbuild";
-import { cpSync, mkdirSync, existsSync, readFileSync } from "fs";
+import { cpSync, mkdirSync, readFileSync, existsSync, watch } from "fs";
 
-const watch = process.argv.includes("--watch");
+const isWatch = process.argv.includes("--watch");
 
 const entryPoints = [
   { in: "src/content/index.ts", out: "content" },
-  { in: "src/background.ts", out: "background" },
+  { in: "src/background/index.ts", out: "background" },
   { in: "src/popup/popup.ts", out: "popup/popup" },
 ];
 
@@ -33,28 +33,46 @@ const buildOptions = {
   target: "es2020",
   logLevel: "info",
   define: {
-    __OPENROUTERS_API_KEY__: JSON.stringify(env.OPENROUTERS_KEY || ""),
+    __OPENROUTERS_KEY__: JSON.stringify(env.OPENROUTERS_KEY || ""),
   },
 };
 
 // Copy static files to dist
-cpSync("src/popup/popup.html", "dist/popup/popup.html", { recursive: true });
+cpSync("src/popup/popup.html", "dist/popup/popup.html");
 
 // Copy PDF.js library files needed by the viewer
 mkdirSync("pdfjs/build", { recursive: true });
 mkdirSync("pdfjs/web", { recursive: true });
-if (!existsSync("pdfjs/build/pdf.mjs")) {
-  cpSync("node_modules/pdfjs-dist/build/pdf.mjs", "pdfjs/build/pdf.mjs");
-  cpSync("node_modules/pdfjs-dist/build/pdf.worker.mjs", "pdfjs/build/pdf.worker.mjs");
-  cpSync("node_modules/pdfjs-dist/web/pdf_viewer.css", "pdfjs/web/pdf_viewer.css");
-}
-// Always copy the viewer HTML (it's our source file, cheap to copy)
-cpSync("src/pdfjs/viewer.html", "pdfjs/web/viewer.html");
-cpSync("src/pdfjs/viewer.js", "pdfjs/web/viewer.js");
+// Vendored runtime files — re-copied every build so a pdfjs-dist upgrade
+// (bumped in package.json) is never silently served stale.
+cpSync("node_modules/pdfjs-dist/build/pdf.mjs", "pdfjs/build/pdf.mjs");
+cpSync("node_modules/pdfjs-dist/build/pdf.worker.mjs", "pdfjs/build/pdf.worker.mjs");
+cpSync("node_modules/pdfjs-dist/web/pdf_viewer.css", "pdfjs/web/pdf_viewer.css");
 
-if (watch) {
+function copyViewerSource() {
+  cpSync("src/pdfjs/viewer.html", "pdfjs/web/viewer.html");
+  cpSync("src/pdfjs/viewer.js", "pdfjs/web/viewer.js");
+}
+copyViewerSource();
+
+if (isWatch) {
   const ctx = await esbuild.context(buildOptions);
   await ctx.watch();
+  // esbuild's own watch only covers its bundled entry points — src/pdfjs/*
+  // is copied verbatim (see CLAUDE.md), so it needs its own watcher or
+  // edits during `npm run watch` silently serve stale output.
+  watch("src/pdfjs", { persistent: true }, (_event, filename) => {
+    if (filename !== "viewer.html" && filename !== "viewer.js") return;
+    // Editors/git replace files non-atomically, so the change event can fire
+    // while the file is momentarily absent — ignore that instead of crashing.
+    if (!existsSync(`src/pdfjs/${filename}`)) return;
+    try {
+      copyViewerSource();
+      console.log(`Copied src/pdfjs/${filename} -> pdfjs/web/`);
+    } catch (err) {
+      console.error(`Failed to copy src/pdfjs/${filename}:`, err.message);
+    }
+  });
   console.log("Watching for changes...");
 } else {
   await esbuild.build(buildOptions);
