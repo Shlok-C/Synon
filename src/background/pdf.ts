@@ -56,61 +56,70 @@ export function redirectToViewerIfEnabled(tabId: number, pdfUrl: string): void {
 }
 
 // --- Open PDF tab registry (survives extension reload; used to restore tabs closed by it) ---
-const OPEN_PDF_TABS_KEY = "openPdfTabs";
+// One chrome.storage.local key per tab ("pdfTab:<tabId>" → PDF URL), never a
+// shared object: every write is a single set/remove, so viewer tabs that
+// register at the same moment (most of all the batch reopened after a reload)
+// can't overwrite each other's entries — a shared get→mutate→set map lost
+// entries that way and shrank with every reload.
+const PDF_TAB_KEY_PREFIX = "pdfTab:";
+// Pre-2026-11 registry format (one shared map); read once by the restore, then deleted.
+const LEGACY_OPEN_PDF_TABS_KEY = "openPdfTabs";
+
+const pdfTabKey = (tabId: number) => `${PDF_TAB_KEY_PREFIX}${tabId}`;
 
 export function registerPdfTab(tabId: number, pdfUrl: string): void {
-  chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
-    const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
-    tabs[String(tabId)] = pdfUrl;
-    chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: tabs });
-  });
+  chrome.storage.local.set({ [pdfTabKey(tabId)]: pdfUrl });
 }
 
-function unregisterPdfTab(tabId: number): void {
-  chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
-    const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
-    if (!(String(tabId) in tabs)) return;
-    delete tabs[String(tabId)];
-    chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: tabs });
-  });
+// Called the moment a tab closes or leaves the viewer — not deferred. Measured
+// against real extension reloads: the reload's own teardown of viewer tabs never
+// reaches a worker's onRemoved before the new instance's restore read, whereas a
+// deferred removal died with the old worker, so a tab the user closed just
+// before reloading came back. A tab that was never a PDF has no key: no-op.
+export function unregisterPdfTab(tabId: number): void {
+  chrome.storage.local.remove(pdfTabKey(tabId));
 }
 
-// Deferred, not synchronous: if this tab is closing because the OLD extension
-// instance's origin is being torn down for a reload, that instance's JS
-// context is killed at/around the same moment — a pending setTimeout in it
-// never fires, so this registry entry survives untouched for the NEW
-// instance's restore read moments later. If the tab closed during ordinary
-// operation, the prune still happens ~5s later (imperceptible; the registry
-// is only ever consulted at the next reload).
-const PDF_UNREGISTER_DELAY_MS = 5000;
+async function readRegistry(): Promise<Record<string, string>> {
+  const all = await chrome.storage.local.get(null);
+  const entries: Record<string, string> = {};
+  for (const [key, value] of Object.entries(all)) {
+    if (key.startsWith(PDF_TAB_KEY_PREFIX) && typeof value === "string") entries[key] = value;
+  }
+  return entries;
+}
 
-export function scheduleUnregisterPdfTab(tabId: number): void {
-  setTimeout(() => unregisterPdfTab(tabId), PDF_UNREGISTER_DELAY_MS);
+// On browser startup: tab IDs don't survive a restart, so any entry whose tab
+// doesn't exist is left over from a session that ended without onRemoved
+// firing (crash, or shutdown with the worker asleep) and would otherwise
+// reopen a long-closed PDF at the next reload. Viewer tabs restored by Chrome
+// re-register themselves under their new IDs.
+export async function pruneStalePdfTabs(): Promise<void> {
+  const [entries, tabs] = await Promise.all([readRegistry(), chrome.tabs.query({})]);
+  const liveKeys = new Set(tabs.map((t) => (t.id != null ? pdfTabKey(t.id) : "")));
+  const stale = Object.keys(entries).filter((key) => !liveKeys.has(key));
+  if (stale.length) await chrome.storage.local.remove(stale);
 }
 
 // After an extension update/reload: reopen every registered PDF in a new
 // inactive tab (unless the user turned pdfReopenOnReload off).
-export function reopenRegisteredPdfTabs(): void {
-  chrome.storage.sync.get("pdfReopenOnReload", (settings) => {
-    if (settings.pdfReopenOnReload === false) return;
+export async function reopenRegisteredPdfTabs(): Promise<void> {
+  const settings = await chrome.storage.sync.get("pdfReopenOnReload");
+  if (settings.pdfReopenOnReload === false) return;
 
-    chrome.storage.local.get(OPEN_PDF_TABS_KEY, (result) => {
-      const tabs: Record<string, string> = result[OPEN_PDF_TABS_KEY] || {};
-      // Multiple tabIds can legitimately map to the same URL (the same PDF
-      // open in two tabs, or a close+reopen racing the delayed unregister) —
-      // restore at most one tab per unique PDF.
-      const uniquePdfUrls = Array.from(new Set(Object.values(tabs)));
-      if (uniquePdfUrls.length === 0) return;
+  const entries = await readRegistry();
+  const legacy = (await chrome.storage.local.get(LEGACY_OPEN_PDF_TABS_KEY))[LEGACY_OPEN_PDF_TABS_KEY] as
+    | Record<string, string>
+    | undefined;
+  // The same PDF can be open in two tabs — restore at most one per URL.
+  const uniquePdfUrls = Array.from(new Set([...Object.values(entries), ...Object.values(legacy ?? {})]));
 
-      // Old tab IDs are stale after a reload — clear before recreating.
-      chrome.storage.local.set({ [OPEN_PDF_TABS_KEY]: {} });
+  // Old tab IDs are stale after a reload. Remove exactly those keys, and before
+  // creating tabs, so the new tabs' own registrations are never caught by it.
+  await chrome.storage.local.remove([...Object.keys(entries), LEGACY_OPEN_PDF_TABS_KEY]);
 
-      for (const pdfUrl of uniquePdfUrls) {
-        // Registration of the new tab is left to its own viewer.js self-report
-        // (MSG_PDF_VIEWER_OPENED) — same single-source-of-truth pattern as
-        // onBeforeNavigate and MSG_PDF_DETECTED.
-        chrome.tabs.create({ url: getViewerUrl(pdfUrl), active: false });
-      }
-    });
-  });
+  for (const pdfUrl of uniquePdfUrls) {
+    // The new tab registers itself via its viewer.js self-report (MSG_PDF_VIEWER_OPENED).
+    chrome.tabs.create({ url: getViewerUrl(pdfUrl), active: false });
+  }
 }

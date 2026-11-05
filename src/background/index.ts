@@ -27,6 +27,7 @@ import type {
   SwitchTabMessage,
 } from "../shared/messages";
 import { addTabToLibrary } from "../shared/library-db";
+import { getOriginalPdfUrlFromViewerUrl } from "../shared/pdf-viewer-url";
 import { handleDefine } from "./define";
 import { generatePdfOutline } from "./openrouter";
 import {
@@ -35,7 +36,8 @@ import {
   bypassRedirect,
   redirectToViewerIfEnabled,
   registerPdfTab,
-  scheduleUnregisterPdfTab,
+  unregisterPdfTab,
+  pruneStalePdfTabs,
   reopenRegisteredPdfTabs,
 } from "./pdf";
 
@@ -57,8 +59,21 @@ async function switchTab(fromTab: chrome.tabs.Tab, direction: SwitchTabMessage["
 }
 
 // --- PDF detection ---
+// Reopen-on-reload registry upkeep: a tab leaves it when it's closed or when it
+// navigates away from the viewer; it joins via the viewer's own
+// MSG_PDF_VIEWER_OPENED (below), which also re-registers in-viewer PDF changes.
 chrome.tabs.onRemoved.addListener((tabId) => {
-  scheduleUnregisterPdfTab(tabId);
+  unregisterPdfTab(tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url && getOriginalPdfUrlFromViewerUrl(changeInfo.url) === null) {
+    unregisterPdfTab(tabId);
+  }
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  pruneStalePdfTabs();
 });
 
 // Embedded PDFs (<embed>/<object>/<iframe> in a page) are swapped for the
